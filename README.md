@@ -9,7 +9,7 @@
 - 当前有效需求基线：`docs/01-requirements-spec.md`
 - 详细设计：已完成
 - 实施计划：已完成
-- 编码实现：阶段 1 阻塞
+- 编码实现：阶段 1 已完成
 
 ## 当前原则
 
@@ -27,7 +27,9 @@
 - 已通过 `npm run build`、`cargo check --manifest-path src-tauri\Cargo.toml` 与 `cargo tauri build --debug`
 - Windows 调试构建链路已验证通过
 - 已完成 `cargo tauri android init --ci --skip-targets-install`
-- Android 调试构建当前受 Google Maven TLS 握手失败阻塞，基础启动验证尚未完成
+- 已通过 `cargo tauri android build --debug -t aarch64 --apk -v`
+- 用户已确认 Android 实际安装与基础功能正常
+- 阶段 1 已完成，下一步进入阶段 2 的 Rust 数据层实现
 
 ## 文档
 

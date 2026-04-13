@@ -23,12 +23,12 @@
 - 需求规格说明：`已完成`
 - 详细设计：`已完成`
 - 实施计划：`已完成`
-- 编码实施：`阻塞`
+- 编码实施：`进行中`
 
 补充说明：
 
 - 仓库中的历史 Flutter 原型不计入当前主线进度。
-- 当前编码主线已开始，阶段 1 已完成 Windows 构建验证，但 Android 基础验证受外部网络环境阻塞。
+- 当前编码主线已开始，阶段 1 已完成，下一步进入阶段 2 的 Rust 数据层实现。
 
 ## 4. 实施原则
 
@@ -59,7 +59,7 @@
 
 ### 阶段 1. 新工程初始化与基础骨架
 
-当前状态：`阻塞`
+当前状态：`已完成`
 
 当前进展：
 
@@ -71,7 +71,9 @@
 - `cargo check --manifest-path src-tauri\Cargo.toml` 已通过。
 - `cargo tauri build --debug` 已通过，Windows 可启动应用验收项已满足。
 - 已执行 `cargo tauri android init --ci --skip-targets-install`，Android 工程壳已生成。
-- `cargo tauri android build --debug -v` 已定位阻塞点：Gradle 访问 `dl.google.com` / Google Maven 时 TLS 握手失败，Android 基础启动验证尚未完成。
+- `cargo tauri android build --debug -t aarch64 --apk -v` 已通过，Android 单架构调试 APK 已生成。
+- 用户已确认 Android 端实际安装并可正常使用，阶段 1 验收条件已满足。
+- Android 全 ABI 构建仍可能受网络波动影响，后续按发布策略再决定是否补齐。
 
 目标：
 
@@ -548,7 +550,7 @@
 
 建议下一步先执行阶段 1 的剩余动作：
 
-1. 解决 Android 构建阶段访问 Google Maven 的 TLS 握手问题
-2. 重新执行 Android 端基础构建与启动验证
-3. 确认 `Naive UI` 日期控件在两端均可正常显示与交互
-4. 完成阶段 1 验收后进入阶段 2 的 Rust 数据层实现
+1. 开始阶段 2，确定 Rust 侧 SQLite 访问方案与迁移机制
+2. 建立核心表结构与领域对象初版
+3. 补齐本地数据库初始化、仓储层与基础测试
+4. 视发布策略决定是否继续补齐 Android 多 ABI 构建

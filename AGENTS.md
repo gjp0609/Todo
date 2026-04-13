@@ -43,7 +43,9 @@
 - 当前 `cargo check --manifest-path src-tauri\Cargo.toml` 已通过。
 - 当前 `cargo tauri build --debug` 已通过，Windows 调试构建链路已完成验证。
 - 当前已执行 `cargo tauri android init --ci --skip-targets-install`，Android 工程壳已生成。
-- 当前 Android 调试构建受外部网络环境阻塞：Gradle 拉取 `dl.google.com` / Google Maven 依赖时发生 TLS 握手失败，阶段 1 暂不能完成 Android 基础启动验证。
+- 截至 2026-04-13，`cargo tauri android build --debug -t aarch64 --apk -v` 已通过，Android 单架构调试 APK 构建链路已验证。
+- 截至 2026-04-13，用户已确认 Android 端实际安装并可正常使用，阶段 1 的 Android 基础启动验证已满足。
+- 当前 Android 全 ABI 构建仍可能因网络抖动触发额外 Rust target 下载或远端依赖拉取超时；基础验证阶段优先使用 `aarch64` 单目标构建。
 
 ## 当前文档约定
 
