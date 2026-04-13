@@ -13,50 +13,27 @@
 - 实施计划文档必须带有明确状态标识，至少区分：未开始、进行中、已完成、阻塞。
 - 每次完成阶段性工作后，应同步更新实施计划中的状态，保证能直接从文档判断当前进度。
 - 在执行过程中遇到新的稳定信息、环境约束、实现前提或风险时，必须及时补充到相关文档中，避免会话压缩后信息丢失。
-- 若信息属于长期协作约束、环境基线或执行习惯，应同步补充到 `AGENTS.md`。
-- 每次涉及 UI 改动且需要用户验证效果时，除 `analyze` / `test` 外，还必须至少执行一次实际构建；桌面相关改动优先构建 Windows，移动端相关改动优先构建 Android，跨端导航或布局改动默认两端都构建。
-- 当前占位页仅用于验证导航壳、信息层级和基本布局，不代表正式页面默认留白、卡片密度或最终视觉样式；后续功能页面实现时不得直接把占位页 spacing 当作设计基线。
+- 若信息属于长期协作约束、环境基线或执行习惯，应同步补充到 AGENTS.md。
+- 需求.md 属于原始需求文档，用于阶段性校准是否跑偏，默认保留，不纳入常规清理范围。
+- 需要提权的命令应尽量保持前缀固定且命令本体简短；避免把清理、构建、校验等多个动作拼成超长单条命令，便于用户将常用前缀加入白名单。
+- 每次涉及 UI 改动且需要用户验证效果时，除静态检查外，还必须至少执行一次实际构建；桌面相关改动优先构建 Windows，移动端相关改动优先构建 Android，跨端导航或布局改动默认两端都构建。
 
 ## 当前项目基线
 
-- 客户端技术栈：Flutter
-- 路由方案：go_router
-- 日志方案：logging
-- 时间处理基础库：intl + timezone
-- 本地存储：SQLite
-- 同步方式：WebDAV
-- 目标平台：Windows、Android
+- 当前项目按新的 SPEC 主线推进。
+- 当前业务核心保持不变：任务以截止时间为核心，开始时间表示进入视野时间，而非持续占用时间。
+- 当前不单独建模传统“持续事件/整段占用型日程”。
+- 重复任务按“模板 + 模板版本段 + 单次覆盖”的思路设计。
+- 任务状态固定为：未完成、完成、取消。
+- 同步策略按“远程优先”理解：同步与保存冲突时以远端为准，本地作为工作副本与离线缓存。
+- 当前产品目标平台为 Windows 与 Android，后续设计与实现必须以双端兼容为前提，允许分阶段交付，但不得按单端产品建模。
+- 当前已确定主线技术架构：`Tauri v2 + Vue 3 + TypeScript + Vite + Rust + SQLite + WebDAV`。
+- 前端不直接连接 WebDAV，也不直接访问 SQLite；数据库、同步、后台与平台能力统一收敛在 Rust 侧。
+- 前端整体界面以自定义设计系统为主，复杂日期时间控件例外采用 `Naive UI` 能力，不以大型 UI 库作为整站基座。
 
 ## 当前环境基线
 
-- Flutter 通过 Scoop 安装。
-- Flutter SDK 当前路径：`R:\Files\Scoop\Scoop\apps\flutter\current\bin\flutter.bat`
-- Android SDK 当前路径：`R:\Files\Android\Sdk`
-- 系统默认 Java 保持为 Java 25，不做全局替换。
-- 当前项目的 Android 构建单独固定到 JDK 21。
-- 项目专用 JDK 21 路径：`R:\Files\Scoop\Scoop\apps\temurin21-jdk\current`
-- `android/gradle.properties` 已设置 `org.gradle.java.home` 指向 JDK 21。
-- 当前 Android toolchain 已通过 `flutter doctor` 检查。
-- 当前 `flutter` / `dart` 尚未加入全局 PATH；执行 Flutter 命令时优先使用 Flutter 完整路径。
-- 某些 Flutter 命令会写入 Scoop 下的 Flutter SDK 缓存目录，必要时需要提权执行。
-- 在当前环境下，`flutter` / `dart` / `build_runner` 等命令默认应优先按提权方式执行，否则容易因 SDK 缓存写入受限而表现为卡住或超时。
-- 由于当前网络环境对 GitHub 二进制下载不稳定，`sqlite3` 优先使用系统 SQLite 库而不是构建时下载预编译二进制。
-- 当前 Windows 构建已通过。
-- 当前 Android `app-debug.apk` 已生成。
-- 截至 2026-04-08，`flutter doctor -v` 中的 Android toolchain、网络资源、许可证检查均已通过。
-- 截至 2026-04-08，Windows 构建与 Android Debug 构建均可直接执行通过。
-- 当前 `flutter doctor` 剩余告警仅为 `flutter` / `dart` 未加入全局 PATH，这不影响项目构建与校验。
-- 若 Flutter 命令异常中断，需要优先检查并清理 `R:\Files\Scoop\Scoop\apps\flutter\current\bin\cache\flutter.bat.lock`。
-- 当前本地正常校验流程 `dart run build_runner build -> dart format -> flutter analyze -> flutter test` 已可在提权后直接跑通。
-- 就当前项目本地校验而言，翻墙不是默认前置条件；若再次出现“像卡住”的现象，优先检查是否未提权、是否存在 `flutter.bat.lock`，再判断是否为网络问题。
-
-## 当前业务语义
-
-- 任务以截止时间为核心。
-- 开始时间表示任务进入视野的时间，不表示该任务持续占满该时间段。
-- 当前不单独建模传统“持续事件/整段占用型日程”。
-- 重复任务通过“模板 + 模板版本段 + 单次覆盖”实现。
-- 任务状态固定为：未完成、完成、取消。
+- 新技术栈涉及的环境初始化、构建链、依赖管理与校验流程，应在实施过程中持续记录并补充。
 
 ## 当前文档约定
 
@@ -65,3 +42,4 @@
 - 实施计划：`docs/03-implementation-plan.md`
 
 后续开发、讨论和实现应以上述文档为当前基线。
+
