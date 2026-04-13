@@ -118,9 +118,9 @@
 - 已落地核心表初版：`task_series`、`task_series_revision`、`task_occurrence_override`、`tag`、`holiday_calendar`、`sync_meta`、`app_settings`。
 - 已定义首批领域对象：任务模板、版本段、单次覆盖、标签、节假日、同步元数据、应用设置。
 - 已实现 `sync_meta`、`tag`、`task_series`、`task_series_revision`、`task_occurrence_override` 的最小仓储与事务边界。
-- 已实现 `app_get_bootstrap_status`、`tag_list`、`task_create`、`task_get_detail`、`task_update`、`task_delete`、`task_set_status`、`upcoming_query` 命令闭环。
-- 已完成单次任务创建、详情回查、更新、删除、状态修改、标签校验、时间字段基础校验以及近期查询的单次任务版本。
-- 已补基础测试并通过 `cargo test --manifest-path src-tauri\Cargo.toml`，当前共 12 个 Rust 测试通过。
+- 已实现 `app_get_bootstrap_status`、`tag_list`、`task_create`、`task_get_detail`、`task_get_editor`、`task_update`、`task_delete`、`task_set_status`、`upcoming_query` 命令闭环。
+- 已完成单次任务创建、详情回查、编辑态投影、更新、删除、状态修改、标签校验、时间字段基础校验以及近期查询的单次任务版本。
+- 已补基础测试并通过 `cargo test --manifest-path src-tauri\Cargo.toml`，当前共 13 个 Rust 测试通过。
 
 执行清单：
 
@@ -130,8 +130,10 @@
 - `已完成` 实现 `sync_meta`、`tag`、`task_series`、`task_series_revision`、`task_occurrence_override` 的基础仓储与事务边界。
 - `已完成` 实现单次任务基础命令：`task_create`、`task_get_detail`、`task_update`、`task_delete`、`task_set_status`。
 - `已完成` 实现面向页面读取的基础查询命令首版：`upcoming_query` 的单次任务版本。
-- `未开始` 补齐任务列表/详情/编辑态之间更稳定的 DTO 契约。
-- `未开始` 评估阶段 2 是否已满足收口条件，并为阶段 3 前端接入准备后端契约。
+- `已完成` 补齐任务列表/详情/编辑态之间更稳定的 DTO 契约，新增 `task_get_editor`。
+- `进行中` 评估阶段 2 是否已满足收口条件，并整理剩余非任务类基础数据能力。
+- `未开始` 补齐 `tag`、`app_settings`、`sync_meta`、`holiday_calendar` 的更完整读写接口。
+- `未开始` 为阶段 3 的前端新建/编辑任务页接入准备更稳定的命令契约。
 
 目标：
 
@@ -572,7 +574,7 @@
 
 建议下一步执行阶段 2 的当前动作：
 
-1. 建立任务列表/详情/编辑态更稳定的 DTO 契约
-2. 评估阶段 2 剩余工作与收口条件
+1. 完成阶段 2 剩余评估，并明确收口前必须补齐的非任务类数据接口
+2. 补齐 `tag`、`app_settings`、`sync_meta`、`holiday_calendar` 的更完整读写接口
 3. 为阶段 3 的前端新建/编辑任务页接入准备更稳定的命令契约
 4. 视发布策略决定是否继续补齐 Android 多 ABI 构建

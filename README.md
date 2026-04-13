@@ -34,8 +34,9 @@
 - 已落地 7 张核心表初版、最小仓储层与事务边界
 - 已完成 `task_create`、`task_get_detail`、`task_update`、`task_delete`、`task_set_status` 的单次任务后端闭环
 - 已完成 `upcoming_query` 的单次任务版本，支持时间窗口过滤与排序
-- 已通过 `cargo check --manifest-path src-tauri\Cargo.toml` 与 `cargo test --manifest-path src-tauri\Cargo.toml`，当前共 12 个 Rust 测试通过
-- 当前正在推进阶段 2 的 DTO 契约稳定化与阶段 3 的前端对接准备
+- 已完成 `task_get_editor`，详情态与编辑态已分离为独立 DTO
+- 已通过 `cargo check --manifest-path src-tauri\Cargo.toml` 与 `cargo test --manifest-path src-tauri\Cargo.toml`，当前共 13 个 Rust 测试通过
+- 当前正在评估阶段 2 的收口条件，并准备继续补齐非任务类基础数据能力
 
 ## 文档
 

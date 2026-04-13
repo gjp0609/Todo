@@ -83,6 +83,24 @@ pub struct TaskDetailDto {
     pub cancelled_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskEditorDto {
+    pub series_id: String,
+    pub revision_id: String,
+    pub kind: String,
+    pub title: String,
+    pub note: Option<String>,
+    pub tag_id: Option<String>,
+    pub priority: Option<i64>,
+    pub all_day: bool,
+    pub start_date: Option<String>,
+    pub start_time: Option<String>,
+    pub due_date: String,
+    pub due_time: Option<String>,
+    pub current_status: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpcomingQueryInput {
@@ -212,6 +230,33 @@ impl TaskService {
         series_id: &str,
     ) -> AppResult<Option<TaskDetailDto>> {
         database.with_connection(|connection| Self::load_task_detail(connection, series_id))
+    }
+
+    pub fn get_task_editor(
+        database: &Database,
+        series_id: &str,
+    ) -> AppResult<Option<TaskEditorDto>> {
+        database.with_connection(|connection| {
+            let Some(detail) = Self::load_task_detail(connection, series_id)? else {
+                return Ok(None);
+            };
+
+            Ok(Some(TaskEditorDto {
+                series_id: detail.series_id,
+                revision_id: detail.revision_id,
+                kind: detail.kind,
+                title: detail.title,
+                note: detail.note,
+                tag_id: detail.tag_id,
+                priority: detail.priority,
+                all_day: detail.all_day,
+                start_date: detail.start_date,
+                start_time: detail.start_time,
+                due_date: detail.due_date,
+                due_time: detail.due_time,
+                current_status: detail.status,
+            }))
+        })
     }
 
     pub fn update_task(database: &Database, input: TaskUpdateInput) -> AppResult<TaskDetailDto> {
@@ -991,5 +1036,42 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].title, "第一个");
         assert_eq!(tasks[1].title, "第三个");
+    }
+
+    #[test]
+    fn get_task_editor_returns_editor_projection() {
+        let temp_dir = tempdir().expect("should create temp dir");
+        let db_path = temp_dir.path().join("todo.data.sqlite3");
+        let database = Database::open_at(&db_path).expect("should open database");
+
+        let created = TaskService::create_task(
+            &database,
+            TaskCreateInput {
+                title: "编辑投影".to_string(),
+                note: Some("用于表单".to_string()),
+                tag_id: None,
+                priority: Some(2),
+                all_day: false,
+                start_date: Some("2026-04-13".to_string()),
+                start_time: Some("08:30".to_string()),
+                due_date: "2026-04-14".to_string(),
+                due_time: Some("19:00".to_string()),
+            },
+        )
+        .expect("should create task");
+
+        let editor = TaskService::get_task_editor(&database, &created.series_id)
+            .expect("should get editor")
+            .expect("editor should exist");
+
+        assert_eq!(editor.series_id, created.series_id);
+        assert_eq!(editor.revision_id, created.revision_id);
+        assert_eq!(editor.title, "编辑投影");
+        assert_eq!(editor.note.as_deref(), Some("用于表单"));
+        assert_eq!(editor.start_date.as_deref(), Some("2026-04-13"));
+        assert_eq!(editor.start_time.as_deref(), Some("08:30"));
+        assert_eq!(editor.due_date, "2026-04-14");
+        assert_eq!(editor.due_time.as_deref(), Some("19:00"));
+        assert_eq!(editor.current_status, "pending");
     }
 }

@@ -8,8 +8,8 @@ use db::{BootstrapStatus, Database};
 use domain::Tag;
 use error::{CommandError, CommandResult};
 use service::task_service::{
-    TaskCreateInput, TaskDetailDto, TaskListItemDto, TaskService, TaskSetStatusInput,
-    TaskUpdateInput, UpcomingQueryInput,
+    TaskCreateInput, TaskDetailDto, TaskEditorDto, TaskListItemDto, TaskService,
+    TaskSetStatusInput, TaskUpdateInput, UpcomingQueryInput,
 };
 use tauri::{Manager, State};
 
@@ -46,6 +46,14 @@ fn task_get_detail(
     series_id: String,
 ) -> CommandResult<Option<TaskDetailDto>> {
     TaskService::get_task_detail(&state.database, &series_id).map_err(CommandError::from)
+}
+
+#[tauri::command]
+fn task_get_editor(
+    state: State<'_, AppState>,
+    series_id: String,
+) -> CommandResult<Option<TaskEditorDto>> {
+    TaskService::get_task_editor(&state.database, &series_id).map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -93,6 +101,7 @@ pub fn run() {
             tag_list,
             task_create,
             task_get_detail,
+            task_get_editor,
             task_update,
             task_delete,
             task_set_status,

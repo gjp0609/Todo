@@ -55,7 +55,8 @@
 - 截至 2026-04-13，阶段 2 已完成 `task_create`、`task_get_detail` 的单次任务后端闭环与输入校验。
 - 截至 2026-04-13，阶段 2 已完成 `task_update`、`task_delete`、`task_set_status` 的单次任务后端闭环。
 - 截至 2026-04-13，阶段 2 已完成 `upcoming_query` 的单次任务版本，支持时间窗口过滤与排序。
-- 截至 2026-04-13，`cargo test --manifest-path src-tauri\Cargo.toml` 已通过，当前共 12 个 Rust 测试通过。
+- 截至 2026-04-13，阶段 2 已完成 `task_get_editor`，详情态与编辑态已分离为独立 DTO。
+- 截至 2026-04-13，`cargo test --manifest-path src-tauri\Cargo.toml` 已通过，当前共 13 个 Rust 测试通过。
 
 ## 当前文档约定
 
