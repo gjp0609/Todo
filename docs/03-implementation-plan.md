@@ -23,12 +23,12 @@
 - 需求规格说明：`已完成`
 - 详细设计：`已完成`
 - 实施计划：`已完成`
-- 编码实施：`未开始`
+- 编码实施：`阻塞`
 
 补充说明：
 
 - 仓库中的历史 Flutter 原型不计入当前主线进度。
-- 当前编码主线尚未开始，新阶段将基于 `Tauri v2 + Vue 3 + TypeScript + Vite + Rust + SQLite + WebDAV` 重新初始化。
+- 当前编码主线已开始，阶段 1 已完成 Windows 构建验证，但 Android 基础验证受外部网络环境阻塞。
 
 ## 4. 实施原则
 
@@ -59,7 +59,19 @@
 
 ### 阶段 1. 新工程初始化与基础骨架
 
-当前状态：`未开始`
+当前状态：`阻塞`
+
+当前进展：
+
+- 已手写完成 `Vue 3 + TypeScript + Vite` 前端基础骨架。
+- 已初始化 `src-tauri`。
+- 已接入 `Pinia`、`@tanstack/vue-query` 与 `Naive UI`。
+- 已补充最小 `greet` command 验证链路。
+- `npm run build` 已通过。
+- `cargo check --manifest-path src-tauri\Cargo.toml` 已通过。
+- `cargo tauri build --debug` 已通过，Windows 可启动应用验收项已满足。
+- 已执行 `cargo tauri android init --ci --skip-targets-install`，Android 工程壳已生成。
+- `cargo tauri android build --debug -v` 已定位阻塞点：Gradle 访问 `dl.google.com` / Google Maven 时 TLS 握手失败，Android 基础启动验证尚未完成。
 
 目标：
 
@@ -534,12 +546,9 @@
 
 ## 11. 下一步执行建议
 
-建议下一步先执行阶段 1 的最小起步动作：
+建议下一步先执行阶段 1 的剩余动作：
 
-1. 初始化新的 Tauri 工程
-2. 建立 `Vue 3 + TypeScript + Vite` 前端骨架
-3. 建立 Rust 目录结构与 command demo
-4. 验证 Windows 与 Android 基础启动
-5. 验证 `Naive UI` 日期控件单点可用性
-
-完成以上内容后，再进入阶段 2 的 Rust 数据层实现。
+1. 解决 Android 构建阶段访问 Google Maven 的 TLS 握手问题
+2. 重新执行 Android 端基础构建与启动验证
+3. 确认 `Naive UI` 日期控件在两端均可正常显示与交互
+4. 完成阶段 1 验收后进入阶段 2 的 Rust 数据层实现

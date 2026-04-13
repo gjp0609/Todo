@@ -9,7 +9,7 @@
 - 当前有效需求基线：`docs/01-requirements-spec.md`
 - 详细设计：已完成
 - 实施计划：已完成
-- 编码实现：待开始
+- 编码实现：阶段 1 阻塞
 
 ## 当前原则
 
@@ -19,6 +19,15 @@
 - 当前要求为 Windows 与 Android 双端兼容，允许分阶段实施但不按单端产品设计
 - 当前主线技术架构：`Tauri v2 + Vue 3 + TypeScript + Vite + Rust + SQLite + WebDAV`
 - 前端整体界面以自定义设计系统为主，复杂日期时间控件例外采用 `Naive UI`
+
+## 当前进展
+
+- 已手写完成 `Vue 3 + TypeScript + Vite` 前端基础骨架
+- 已初始化 `src-tauri`
+- 已通过 `npm run build`、`cargo check --manifest-path src-tauri\Cargo.toml` 与 `cargo tauri build --debug`
+- Windows 调试构建链路已验证通过
+- 已完成 `cargo tauri android init --ci --skip-targets-install`
+- Android 调试构建当前受 Google Maven TLS 握手失败阻塞，基础启动验证尚未完成
 
 ## 文档
 
