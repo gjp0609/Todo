@@ -174,6 +174,7 @@
 
 - 阶段 2 已提供 `task_create`、`task_get_detail`、`task_get_editor`、`task_update`、`task_delete`、`task_set_status`、`tag_list` 等前端接入所需命令。
 - 已完成单次任务新建/编辑页首版，接入 `task_create`、`task_get_editor`、`task_update`、`tag_list`。
+- 已完成任务详情展示首版，并接入 `task_get_detail`、`task_set_status`、`task_delete`。
 - 已在编辑页中嵌入未来 31 天任务列表，先作为编辑入口复用 `upcoming_query`。
 - 已落地基础错误提示、空状态与最小前端校验。
 - 已完成当前首版 UI 的 Windows 与 Android 实际构建验证。
@@ -182,7 +183,7 @@
 执行清单：
 
 - `已完成` 实现新建/编辑任务页首版，并接入 `task_create`、`task_get_editor`、`task_update`、`tag_list`。
-- `未开始` 实现任务详情展示首版，并接入 `task_get_detail`、`task_set_status`、`task_delete`。
+- `已完成` 实现任务详情展示首版，并接入 `task_get_detail`、`task_set_status`、`task_delete`。
 - `进行中` 实现近期任务列表与选中态联动，复用 `upcoming_query`。
 - `进行中` 补齐前端字段校验、错误提示与基础空状态。
 - `进行中` 完成 Windows 与 Android 的基础表单交互适配与构建验证。

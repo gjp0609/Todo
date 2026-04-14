@@ -91,6 +91,106 @@
         </aside>
 
         <section class="editor-pane">
+          <section v-if="selectedSeriesId || isDetailLoading || detailError" class="detail-panel">
+            <div class="pane-header">
+              <div>
+                <p class="pane-eyebrow">任务详情</p>
+                <h2>
+                  {{ isDetailLoading ? '正在加载…' : selectedTaskDetail?.title ?? '任务详情' }}
+                </h2>
+              </div>
+
+              <span
+                v-if="selectedTaskDetail"
+                class="status-chip"
+                :class="`status-chip--${selectedTaskDetail.status}`"
+              >
+                {{ statusLabels[selectedTaskDetail.status] }}
+              </span>
+            </div>
+
+            <div v-if="detailError" class="inline-message inline-message--error">
+              {{ detailError }}
+            </div>
+
+            <div v-else-if="isDetailLoading" class="task-list-empty">
+              正在读取任务详情…
+            </div>
+
+            <template v-else-if="selectedTaskDetail">
+              <p v-if="selectedTaskDetail.note" class="detail-note">
+                {{ selectedTaskDetail.note }}
+              </p>
+
+              <div class="detail-grid">
+                <div class="detail-item">
+                  <span class="detail-label">开始</span>
+                  <span class="detail-value">{{ formatStartMeta(selectedTaskDetail) }}</span>
+                </div>
+                <div class="detail-item">
+                  <span class="detail-label">截止</span>
+                  <span class="detail-value">{{ formatDeadlineMeta(selectedTaskDetail) }}</span>
+                </div>
+                <div class="detail-item">
+                  <span class="detail-label">标签</span>
+                  <span class="detail-value">
+                    {{ selectedTaskDetail.tagId ? tagsById.get(selectedTaskDetail.tagId)?.name ?? '未知标签' : '无标签' }}
+                  </span>
+                </div>
+                <div class="detail-item">
+                  <span class="detail-label">优先级</span>
+                  <span class="detail-value">{{ formatPriorityLabel(selectedTaskDetail.priority) }}</span>
+                </div>
+              </div>
+
+              <div class="detail-actions">
+                <button
+                  class="ghost-button"
+                  type="button"
+                  :disabled="isEditorLoading || isStatusSaving || isDeleting"
+                  @click="handleEditSelectedTask"
+                >
+                  加载到编辑表单
+                </button>
+                <button
+                  v-if="selectedTaskDetail.status !== 'completed'"
+                  class="secondary-button"
+                  type="button"
+                  :disabled="isStatusSaving || isDeleting"
+                  @click="handleSetStatus('completed')"
+                >
+                  标记完成
+                </button>
+                <button
+                  v-if="selectedTaskDetail.status !== 'cancelled'"
+                  class="ghost-button"
+                  type="button"
+                  :disabled="isStatusSaving || isDeleting"
+                  @click="handleSetStatus('cancelled')"
+                >
+                  标记取消
+                </button>
+                <button
+                  v-if="selectedTaskDetail.status !== 'pending'"
+                  class="ghost-button"
+                  type="button"
+                  :disabled="isStatusSaving || isDeleting"
+                  @click="handleSetStatus('pending')"
+                >
+                  恢复未完成
+                </button>
+                <button
+                  class="danger-button"
+                  type="button"
+                  :disabled="isStatusSaving || isDeleting"
+                  @click="handleDeleteSelectedTask"
+                >
+                  {{ isDeleting ? '删除中…' : '删除任务' }}
+                </button>
+              </div>
+            </template>
+          </section>
+
           <div class="pane-header">
             <div>
               <p class="pane-eyebrow">编辑表单</p>
@@ -260,9 +360,12 @@ import {
 } from 'naive-ui'
 import {
   createTask,
+  deleteTask,
+  getTaskDetail,
   getTaskEditor,
   listTags,
   queryUpcomingTasks,
+  setTaskStatus,
   updateTask,
   type TagDto,
   type TaskDetailDto,
@@ -312,12 +415,17 @@ interface TaskFormState {
 const tags = ref<TagDto[]>([])
 const upcomingTasks = ref<TaskListItemDto[]>([])
 const selectedSeriesId = ref<string | null>(null)
+const selectedTaskDetail = ref<TaskDetailDto | null>(null)
 
 const isListLoading = ref(false)
+const isDetailLoading = ref(false)
 const isEditorLoading = ref(false)
 const isSaving = ref(false)
+const isStatusSaving = ref(false)
+const isDeleting = ref(false)
 
 const listError = ref('')
+const detailError = ref('')
 const editorError = ref('')
 const formError = ref('')
 const feedback = ref<FeedbackState | null>(null)
@@ -396,8 +504,13 @@ async function loadUpcomingTasks(preserveSelection = true) {
     }
 
     if (selectedSeriesId.value && !tasks.some((task) => task.seriesId === selectedSeriesId.value)) {
+      const removedSeriesId = selectedSeriesId.value
       selectedSeriesId.value = null
-      Object.assign(form, createEmptyForm())
+      selectedTaskDetail.value = null
+
+      if (form.seriesId === removedSeriesId) {
+        Object.assign(form, createEmptyForm())
+      }
     }
   } catch (error) {
     listError.value = `加载近期任务失败：${formatError(error)}`
@@ -407,14 +520,46 @@ async function loadUpcomingTasks(preserveSelection = true) {
 }
 
 async function handleSelectTask(seriesId: string) {
-  if (seriesId === selectedSeriesId.value && isEditing.value) {
+  if (seriesId === selectedSeriesId.value && selectedTaskDetail.value) {
     return
   }
 
   selectedSeriesId.value = seriesId
-  isEditorLoading.value = true
+  selectedTaskDetail.value = null
+  detailError.value = ''
   editorError.value = ''
   formError.value = ''
+  isDetailLoading.value = true
+
+  try {
+    const detail = await getTaskDetail(seriesId)
+    if (!detail) {
+      throw new Error('任务不存在，可能已被删除。')
+    }
+
+    selectedTaskDetail.value = detail
+    feedback.value = {
+      type: 'info',
+      text: `已选中任务“${detail.title}”。`,
+    }
+  } catch (error) {
+    selectedSeriesId.value = null
+    selectedTaskDetail.value = null
+    detailError.value = `读取任务详情失败：${formatError(error)}`
+  } finally {
+    isDetailLoading.value = false
+  }
+}
+
+async function handleEditSelectedTask() {
+  const seriesId = selectedSeriesId.value
+  if (!seriesId) {
+    return
+  }
+
+  isEditorLoading.value = true
+  formError.value = ''
+  editorError.value = ''
 
   try {
     const editor = await getTaskEditor(seriesId)
@@ -438,6 +583,8 @@ async function handleSelectTask(seriesId: string) {
 
 function handleCreateNew() {
   selectedSeriesId.value = null
+  selectedTaskDetail.value = null
+  detailError.value = ''
   editorError.value = ''
   formError.value = ''
   feedback.value = {
@@ -449,6 +596,7 @@ function handleCreateNew() {
 
 async function handleSave() {
   formError.value = ''
+  detailError.value = ''
   editorError.value = ''
 
   const validationError = validateForm()
@@ -471,6 +619,7 @@ async function handleSave() {
 
     applyTaskToForm(saved)
     selectedSeriesId.value = saved.seriesId
+    selectedTaskDetail.value = saved
     feedback.value = {
       type: 'success',
       text: editing ? '任务修改已保存。' : '任务已创建，可继续补充或调整。',
@@ -480,6 +629,70 @@ async function handleSave() {
     formError.value = `保存失败：${formatError(error)}`
   } finally {
     isSaving.value = false
+  }
+}
+
+async function handleSetStatus(status: TaskStatus) {
+  const seriesId = selectedSeriesId.value
+  if (!seriesId) {
+    return
+  }
+
+  isStatusSaving.value = true
+  detailError.value = ''
+
+  try {
+    const detail = await setTaskStatus({ seriesId, status })
+    selectedTaskDetail.value = detail
+
+    if (form.seriesId === detail.seriesId) {
+      form.currentStatus = detail.status
+    }
+
+    feedback.value = {
+      type: 'success',
+      text: `任务状态已更新为${statusLabels[detail.status]}。`,
+    }
+    await loadUpcomingTasks()
+  } catch (error) {
+    detailError.value = `更新任务状态失败：${formatError(error)}`
+  } finally {
+    isStatusSaving.value = false
+  }
+}
+
+async function handleDeleteSelectedTask() {
+  const seriesId = selectedSeriesId.value
+  const title = selectedTaskDetail.value?.title ?? '当前任务'
+  if (!seriesId) {
+    return
+  }
+
+  const confirmed = window.confirm(`确认删除“${title}”？此操作不能撤销。`)
+  if (!confirmed) {
+    return
+  }
+
+  isDeleting.value = true
+  detailError.value = ''
+
+  try {
+    await deleteTask(seriesId)
+    if (form.seriesId === seriesId) {
+      Object.assign(form, createEmptyForm())
+    }
+
+    selectedSeriesId.value = null
+    selectedTaskDetail.value = null
+    feedback.value = {
+      type: 'success',
+      text: '任务已删除。',
+    }
+    await loadUpcomingTasks()
+  } catch (error) {
+    detailError.value = `删除任务失败：${formatError(error)}`
+  } finally {
+    isDeleting.value = false
   }
 }
 
@@ -536,6 +749,10 @@ function validateForm() {
     return '请至少填写截止日期。'
   }
 
+  if (!form.allDay && !form.dueTime) {
+    return '非全天任务必须填写截止时间。'
+  }
+
   if (form.startTime && !form.startDate) {
     return '填写开始时间时必须同时填写开始日期。'
   }
@@ -569,6 +786,38 @@ function formatDueMeta(task: TaskListItemDto) {
   }
 
   return parts.join(' · ')
+}
+
+function formatStartMeta(task: TaskDetailDto) {
+  if (!task.startDate) {
+    return '未设置'
+  }
+
+  const parts = [formatDateLabel(task.startDate)]
+  if (task.allDay) {
+    parts.push('全天')
+  } else if (task.startTime) {
+    parts.push(task.startTime)
+  }
+  return parts.join(' · ')
+}
+
+function formatDeadlineMeta(task: TaskDetailDto) {
+  const parts = [formatDateLabel(task.dueDate)]
+  if (task.allDay) {
+    parts.push('全天')
+  } else if (task.dueTime) {
+    parts.push(task.dueTime)
+  }
+  return parts.join(' · ')
+}
+
+function formatPriorityLabel(priority: number | null) {
+  if (priority === null) {
+    return '默认'
+  }
+
+  return `优先级 ${priority}`
 }
 
 function formatDateLabel(value: string) {
@@ -616,6 +865,18 @@ function normalizePriority(value: string | null) {
 function formatError(error: unknown) {
   if (error instanceof Error) {
     return error.message
+  }
+
+  if (error && typeof error === 'object') {
+    const maybeMessage = Reflect.get(error, 'message')
+    if (typeof maybeMessage === 'string' && maybeMessage.trim()) {
+      return maybeMessage
+    }
+
+    const maybeCode = Reflect.get(error, 'code')
+    if (typeof maybeCode === 'string') {
+      return maybeCode
+    }
   }
 
   return String(error)
@@ -717,6 +978,16 @@ h3 {
   padding: 16px;
 }
 
+.detail-panel {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
 .pane-header {
   display: flex;
   justify-content: space-between;
@@ -728,6 +999,45 @@ h3 {
   display: grid;
   gap: 8px;
   margin-top: 14px;
+}
+
+.detail-note {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text-muted);
+}
+
+.detail-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.detail-item {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface-raised);
+}
+
+.detail-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-muted);
+}
+
+.detail-value {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.detail-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .task-list-empty {
@@ -907,6 +1217,8 @@ h3 {
 
 .primary-button,
 .ghost-button,
+.secondary-button,
+.danger-button,
 .text-button {
   min-height: 38px;
   border-radius: 12px;
@@ -917,6 +1229,8 @@ h3 {
 
 .primary-button:disabled,
 .ghost-button:disabled,
+.secondary-button:disabled,
+.danger-button:disabled,
 .text-button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -935,6 +1249,20 @@ h3 {
   border: 1px solid var(--color-border);
   background: rgba(255, 255, 255, 0.72);
   color: var(--color-text);
+}
+
+.secondary-button {
+  min-width: 112px;
+  border: 1px solid rgba(47, 107, 59, 0.22);
+  background: rgba(223, 240, 226, 0.88);
+  color: #255d32;
+}
+
+.danger-button {
+  min-width: 112px;
+  border: 1px solid rgba(153, 80, 69, 0.22);
+  background: rgba(247, 232, 227, 0.9);
+  color: #8f4a3f;
 }
 
 .text-button {
@@ -994,7 +1322,8 @@ h3 {
   }
 
   .field-grid,
-  .schedule-head {
+  .schedule-head,
+  .detail-grid {
     grid-template-columns: minmax(0, 1fr);
     display: grid;
   }

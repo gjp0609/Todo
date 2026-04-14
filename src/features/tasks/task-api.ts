@@ -79,12 +79,21 @@ export interface TaskUpdateInput extends TaskSaveInput {
   seriesId: string
 }
 
+export interface TaskSetStatusInput {
+  seriesId: string
+  status: TaskStatus
+}
+
 export async function listTags() {
   return invoke<TagDto[]>('tag_list')
 }
 
 export async function queryUpcomingTasks(input: UpcomingQueryInput) {
   return invoke<TaskListItemDto[]>('upcoming_query', { input })
+}
+
+export async function getTaskDetail(seriesId: string) {
+  return invoke<TaskDetailDto | null>('task_get_detail', { seriesId })
 }
 
 export async function getTaskEditor(seriesId: string) {
@@ -97,4 +106,12 @@ export async function createTask(input: TaskSaveInput) {
 
 export async function updateTask(input: TaskUpdateInput) {
   return invoke<TaskDetailDto>('task_update', { input })
+}
+
+export async function setTaskStatus(input: TaskSetStatusInput) {
+  return invoke<TaskDetailDto>('task_set_status', { input })
+}
+
+export async function deleteTask(seriesId: string) {
+  return invoke<void>('task_delete', { seriesId })
 }
