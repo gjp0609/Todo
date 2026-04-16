@@ -127,6 +127,63 @@ impl TaskOccurrenceOverrideRepository {
         Ok(record)
     }
 
+    pub fn list_by_series_id(
+        connection: &Connection,
+        series_id: &str,
+    ) -> AppResult<Vec<TaskOccurrenceOverride>> {
+        let mut statement = connection.prepare(
+            r#"
+        SELECT
+          id,
+          series_id,
+          occurrence_key,
+          override_start_at,
+          override_due_at,
+          override_danger_at,
+          override_title,
+          override_note,
+          override_tag_id,
+          override_priority,
+          status,
+          completed_at,
+          cancelled_at,
+          detached_as_single,
+          created_at,
+          updated_at
+        FROM task_occurrence_override
+        WHERE series_id = ?1
+        ORDER BY created_at ASC
+      "#,
+        )?;
+
+        let rows = statement.query_map([series_id], |row| {
+            Ok(TaskOccurrenceOverride {
+                id: row.get(0)?,
+                series_id: row.get(1)?,
+                occurrence_key: row.get(2)?,
+                override_start_at: row.get(3)?,
+                override_due_at: row.get(4)?,
+                override_danger_at: row.get(5)?,
+                override_title: row.get(6)?,
+                override_note: row.get(7)?,
+                override_tag_id: row.get(8)?,
+                override_priority: row.get(9)?,
+                status: row.get(10)?,
+                completed_at: row.get(11)?,
+                cancelled_at: row.get(12)?,
+                detached_as_single: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
     pub fn delete_by_series_id(connection: &Connection, series_id: &str) -> AppResult<()> {
         connection.execute(
             "DELETE FROM task_occurrence_override WHERE series_id = ?1",

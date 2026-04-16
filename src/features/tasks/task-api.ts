@@ -11,6 +11,8 @@ export interface TagDto {
 
 export interface TaskListItemDto {
   seriesId: string
+  revisionId: string
+  occurrenceKey: string
   title: string
   note: string | null
   tagId: string | null

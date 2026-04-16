@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use time::{
-    format_description::well_known::Iso8601, macros::format_description, Date, Duration,
+    format_description::well_known::Iso8601, macros::format_description, Date, Duration, Month,
     PrimitiveDateTime, Time,
 };
 use uuid::Uuid;
@@ -21,6 +23,11 @@ const STATUS_PENDING: &str = "pending";
 const STATUS_COMPLETED: &str = "completed";
 const STATUS_CANCELLED: &str = "cancelled";
 const TASK_KIND_SINGLE: &str = "single";
+const TASK_KIND_RECURRING: &str = "recurring";
+const RECURRENCE_DAY: &str = "day";
+const RECURRENCE_WEEK: &str = "week";
+const RECURRENCE_MONTH: &str = "month";
+const RECURRENCE_YEAR: &str = "year";
 const DATE_FORMAT: &[time::format_description::FormatItem<'static>] =
     format_description!("[year]-[month]-[day]");
 const TIME_FORMAT: &[time::format_description::FormatItem<'static>] =
@@ -112,6 +119,8 @@ pub struct UpcomingQueryInput {
 #[serde(rename_all = "camelCase")]
 pub struct TaskListItemDto {
     pub series_id: String,
+    pub revision_id: String,
+    pub occurrence_key: String,
     pub title: String,
     pub note: Option<String>,
     pub tag_id: Option<String>,
@@ -136,6 +145,25 @@ struct ParsedTaskInput {
     due_date: Date,
     due_time: Option<Time>,
     duration_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct ScheduleSeed {
+    effective_from: Date,
+    start_time: Option<Time>,
+    due_time: Option<Time>,
+    duration_seconds: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ScheduledOccurrence {
+    revision_id: String,
+    occurrence_key: String,
+    start_date: Option<String>,
+    start_time: Option<String>,
+    due_date: String,
+    due_time: Option<String>,
+    due_date_value: Date,
 }
 
 pub struct TaskService;
@@ -450,32 +478,41 @@ impl TaskService {
         let end_date = start_date + Duration::days(day_count as i64 - 1);
 
         database.with_connection(|connection| {
-            let series_ids = TaskSeriesRepository::list_single_ids(connection)?;
+            let series_list = TaskSeriesRepository::list_active(connection)?;
             let mut items = Vec::new();
 
-            for series_id in series_ids {
-                let Some(detail) = Self::load_task_detail(connection, &series_id)? else {
-                    continue;
-                };
-
-                let due_date = parse_date(&detail.due_date, "任务截止日期")?;
-                if due_date < start_date || due_date > end_date {
+            for series in series_list {
+                let revisions =
+                    TaskSeriesRevisionRepository::list_by_series_id(connection, &series.id)?;
+                if revisions.is_empty() {
                     continue;
                 }
 
-                items.push(TaskListItemDto {
-                    series_id: detail.series_id,
-                    title: detail.title,
-                    note: detail.note,
-                    tag_id: detail.tag_id,
-                    priority: detail.priority,
-                    all_day: detail.all_day,
-                    start_date: detail.start_date,
-                    start_time: detail.start_time,
-                    due_date: detail.due_date,
-                    due_time: detail.due_time,
-                    status: detail.status,
-                });
+                let overrides =
+                    TaskOccurrenceOverrideRepository::list_by_series_id(connection, &series.id)?;
+                let override_map: HashMap<String, TaskOccurrenceOverride> = overrides
+                    .into_iter()
+                    .map(|item| (item.occurrence_key.clone(), item))
+                    .collect();
+
+                for revision in revisions {
+                    let occurrences = expand_occurrences_for_revision(
+                        &series.kind,
+                        &revision,
+                        start_date,
+                        end_date,
+                    )?;
+
+                    for occurrence in occurrences {
+                        let occurrence_override = override_map.get(&occurrence.occurrence_key);
+                        items.push(build_task_list_item(
+                            &series,
+                            &revision,
+                            occurrence,
+                            occurrence_override,
+                        ));
+                    }
+                }
             }
 
             items.sort_by(|left, right| sort_key(left).cmp(&sort_key(right)));
@@ -617,6 +654,11 @@ impl TaskService {
             Some(series) => series,
             None => return Ok(None),
         };
+        if series.kind != TASK_KIND_SINGLE {
+            return Err(AppError::Validation(
+                "当前仅支持读取单次任务详情".to_string(),
+            ));
+        }
 
         let mut revisions = TaskSeriesRevisionRepository::list_by_series_id(connection, series_id)?;
         let revision = revisions
@@ -629,6 +671,313 @@ impl TaskService {
     }
 }
 
+fn build_task_list_item(
+    series: &TaskSeries,
+    revision: &TaskSeriesRevision,
+    occurrence: ScheduledOccurrence,
+    occurrence_override: Option<&TaskOccurrenceOverride>,
+) -> TaskListItemDto {
+    TaskListItemDto {
+        series_id: series.id.clone(),
+        revision_id: occurrence.revision_id,
+        occurrence_key: occurrence.occurrence_key,
+        title: occurrence_override
+            .and_then(|value| value.override_title.clone())
+            .unwrap_or_else(|| revision.title.clone()),
+        note: occurrence_override
+            .and_then(|value| value.override_note.clone())
+            .or_else(|| revision.note.clone()),
+        tag_id: occurrence_override
+            .and_then(|value| value.override_tag_id.clone())
+            .or_else(|| revision.tag_id.clone()),
+        priority: occurrence_override
+            .and_then(|value| value.override_priority)
+            .or(revision.priority),
+        all_day: revision.all_day,
+        start_date: occurrence.start_date,
+        start_time: occurrence.start_time,
+        due_date: occurrence.due_date,
+        due_time: occurrence.due_time,
+        status: occurrence_override
+            .map(|value| value.status.clone())
+            .unwrap_or_else(|| STATUS_PENDING.to_string()),
+    }
+}
+
+fn expand_occurrences_for_revision(
+    series_kind: &str,
+    revision: &TaskSeriesRevision,
+    window_start: Date,
+    window_end: Date,
+) -> AppResult<Vec<ScheduledOccurrence>> {
+    let seed = build_schedule_seed(revision)?;
+    if series_kind == TASK_KIND_SINGLE {
+        let occurrence = build_scheduled_occurrence(revision, &seed, seed.effective_from, true)?;
+        if occurrence.due_date_value < window_start || occurrence.due_date_value > window_end {
+            return Ok(Vec::new());
+        }
+        return Ok(vec![occurrence]);
+    }
+
+    if series_kind != TASK_KIND_RECURRING {
+        return Err(AppError::State(format!(
+            "未知任务类型，无法展开实例: {series_kind}"
+        )));
+    }
+
+    let recurrence_type = revision
+        .recurrence_type
+        .as_deref()
+        .ok_or_else(|| AppError::State("重复任务缺少 recurrence_type".to_string()))?;
+    let recurrence_interval = revision.recurrence_interval.unwrap_or(1);
+    if recurrence_interval <= 0 {
+        return Err(AppError::Validation("重复间隔必须大于 0".to_string()));
+    }
+
+    let recurrence_until = revision
+        .recurrence_until
+        .as_deref()
+        .map(|value| parse_date(value, "循环截止日期"))
+        .transpose()?;
+    let effective_until = revision
+        .effective_until
+        .as_deref()
+        .map(|value| parse_date(value, "版本结束日期"))
+        .transpose()?;
+    let first_occurrence = build_scheduled_occurrence(revision, &seed, seed.effective_from, false)?;
+    let mut occurrence_index = initial_occurrence_index(
+        recurrence_type,
+        first_occurrence.due_date_value,
+        recurrence_interval,
+        window_start,
+    );
+    let mut items = Vec::new();
+
+    loop {
+        let occurrence_start = shift_recurrence_start(
+            seed.effective_from,
+            recurrence_type,
+            recurrence_interval,
+            occurrence_index,
+        )?;
+        if let Some(value) = effective_until {
+            if occurrence_start > value {
+                break;
+            }
+        }
+
+        let occurrence = build_scheduled_occurrence(revision, &seed, occurrence_start, false)?;
+        if let Some(value) = recurrence_until {
+            if occurrence.due_date_value > value {
+                break;
+            }
+        }
+        if occurrence.due_date_value > window_end {
+            break;
+        }
+        if occurrence.due_date_value >= window_start {
+            items.push(occurrence);
+        }
+
+        occurrence_index += 1;
+    }
+
+    Ok(items)
+}
+
+fn build_schedule_seed(revision: &TaskSeriesRevision) -> AppResult<ScheduleSeed> {
+    Ok(ScheduleSeed {
+        effective_from: parse_date(&revision.effective_from, "版本开始日期")?,
+        start_time: revision
+            .start_at_time_part
+            .map(seconds_to_time)
+            .transpose()?,
+        due_time: revision.due_at_time_part.map(seconds_to_time).transpose()?,
+        duration_seconds: revision.duration_seconds.unwrap_or(0),
+    })
+}
+
+fn build_scheduled_occurrence(
+    revision: &TaskSeriesRevision,
+    seed: &ScheduleSeed,
+    start_date: Date,
+    use_legacy_occurrence_key: bool,
+) -> AppResult<ScheduledOccurrence> {
+    let start_anchor =
+        PrimitiveDateTime::new(start_date, seed.start_time.unwrap_or(Time::MIDNIGHT));
+    let due_anchor = start_anchor + Duration::seconds(seed.duration_seconds);
+    let due_date = due_anchor.date();
+    let due_time = if revision.all_day {
+        None
+    } else {
+        seed.due_time.or(Some(due_anchor.time()))
+    };
+
+    let start_date_string = format_date(start_date)?;
+    let due_date_string = format_date(due_date)?;
+    let occurrence_key = if use_legacy_occurrence_key {
+        due_date_string.clone()
+    } else {
+        build_recurrence_occurrence_key(&revision.id, start_anchor, due_anchor)
+    };
+
+    Ok(ScheduledOccurrence {
+        revision_id: revision.id.clone(),
+        occurrence_key,
+        start_date: Some(start_date_string),
+        start_time: seed.start_time.map(format_time).transpose()?,
+        due_date: due_date_string,
+        due_time: due_time.map(format_time).transpose()?,
+        due_date_value: due_date,
+    })
+}
+
+fn build_recurrence_occurrence_key(
+    revision_id: &str,
+    start_anchor: PrimitiveDateTime,
+    due_anchor: PrimitiveDateTime,
+) -> String {
+    format!(
+        "{}|{}|{}",
+        revision_id,
+        format_occurrence_anchor(start_anchor),
+        format_occurrence_anchor(due_anchor)
+    )
+}
+
+fn format_occurrence_anchor(value: PrimitiveDateTime) -> String {
+    let date = value.date();
+    let time = value.time();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        date.year(),
+        u8::from(date.month()),
+        date.day(),
+        time.hour(),
+        time.minute(),
+        time.second()
+    )
+}
+
+fn initial_occurrence_index(
+    recurrence_type: &str,
+    first_due_date: Date,
+    recurrence_interval: i64,
+    window_start: Date,
+) -> i64 {
+    if window_start <= first_due_date {
+        return 0;
+    }
+
+    match recurrence_type {
+        RECURRENCE_DAY => {
+            let diff_days = (window_start - first_due_date).whole_days();
+            ceil_div_positive(diff_days, recurrence_interval)
+        }
+        RECURRENCE_WEEK => {
+            let diff_days = (window_start - first_due_date).whole_days();
+            ceil_div_positive(diff_days, recurrence_interval * 7)
+        }
+        RECURRENCE_MONTH => {
+            approximate_monthly_index(first_due_date, window_start, recurrence_interval)
+        }
+        RECURRENCE_YEAR => {
+            approximate_monthly_index(first_due_date, window_start, recurrence_interval * 12)
+        }
+        _ => 0,
+    }
+}
+
+fn ceil_div_positive(value: i64, divisor: i64) -> i64 {
+    if value <= 0 {
+        0
+    } else {
+        (value + divisor - 1) / divisor
+    }
+}
+
+fn approximate_monthly_index(first_due_date: Date, window_start: Date, step_months: i64) -> i64 {
+    if step_months <= 0 {
+        return 0;
+    }
+
+    let diff_months = months_between(first_due_date, window_start);
+    if diff_months <= 0 {
+        0
+    } else {
+        (diff_months / step_months).saturating_sub(1)
+    }
+}
+
+fn months_between(start: Date, end: Date) -> i64 {
+    let start_month = i64::from(u8::from(start.month()));
+    let end_month = i64::from(u8::from(end.month()));
+    let base = i64::from(end.year() - start.year()) * 12 + (end_month - start_month);
+    if end.day() < start.day() {
+        base - 1
+    } else {
+        base
+    }
+}
+
+fn shift_recurrence_start(
+    base_start: Date,
+    recurrence_type: &str,
+    recurrence_interval: i64,
+    occurrence_index: i64,
+) -> AppResult<Date> {
+    match recurrence_type {
+        RECURRENCE_DAY => Ok(base_start + Duration::days(recurrence_interval * occurrence_index)),
+        RECURRENCE_WEEK => {
+            Ok(base_start + Duration::days(recurrence_interval * occurrence_index * 7))
+        }
+        RECURRENCE_MONTH => add_months_clamped(base_start, recurrence_interval * occurrence_index),
+        RECURRENCE_YEAR => {
+            add_months_clamped(base_start, recurrence_interval * occurrence_index * 12)
+        }
+        other => Err(AppError::Validation(format!(
+            "当前仅支持 day、week、month、year 重复，收到: {other}"
+        ))),
+    }
+}
+
+fn add_months_clamped(date: Date, month_delta: i64) -> AppResult<Date> {
+    let source_month = i64::from(u8::from(date.month())) - 1;
+    let absolute_month = i64::from(date.year()) * 12 + source_month + month_delta;
+    let target_year = absolute_month.div_euclid(12) as i32;
+    let target_month_zero = absolute_month.rem_euclid(12);
+    let target_month = Month::try_from((target_month_zero + 1) as u8)
+        .map_err(|error| AppError::Time(format!("计算重复月份失败: {error}")))?;
+    let target_day = date.day().min(days_in_month(target_year, target_month));
+
+    Date::from_calendar_date(target_year, target_month, target_day)
+        .map_err(|error| AppError::Time(format!("计算重复日期失败: {error}")))
+}
+
+fn days_in_month(year: i32, month: Month) -> u8 {
+    match month {
+        Month::January
+        | Month::March
+        | Month::May
+        | Month::July
+        | Month::August
+        | Month::October
+        | Month::December => 31,
+        Month::April | Month::June | Month::September | Month::November => 30,
+        Month::February => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
 fn reconstruct_task_schedule(
     revision: &TaskSeriesRevision,
 ) -> AppResult<(
@@ -638,40 +987,15 @@ fn reconstruct_task_schedule(
     Option<String>,
     String,
 )> {
-    let effective_from = parse_date(&revision.effective_from, "版本开始日期")?;
-    let start_time = revision
-        .start_at_time_part
-        .map(seconds_to_time)
-        .transpose()?;
-    let duration = revision.duration_seconds.unwrap_or(0);
-    let due_anchor = PrimitiveDateTime::new(effective_from, start_time.unwrap_or(Time::MIDNIGHT))
-        + Duration::seconds(duration);
-    let due_date = due_anchor.date();
-    let due_time = if revision.all_day {
-        None
-    } else if let Some(value) = revision.due_at_time_part {
-        Some(seconds_to_time(value)?)
-    } else {
-        Some(due_anchor.time())
-    };
-
-    let start_date = Some(
-        effective_from
-            .format(DATE_FORMAT)
-            .map_err(|error| AppError::Time(format!("格式化开始日期失败: {error}")))?,
-    );
-    let start_time = start_time.map(format_time).transpose()?;
-    let due_date_string = due_date
-        .format(DATE_FORMAT)
-        .map_err(|error| AppError::Time(format!("格式化截止日期失败: {error}")))?;
-    let due_time_string = due_time.map(format_time).transpose()?;
+    let seed = build_schedule_seed(revision)?;
+    let occurrence = build_scheduled_occurrence(revision, &seed, seed.effective_from, true)?;
 
     Ok((
-        start_date,
-        start_time,
-        due_date_string.clone(),
-        due_time_string,
-        due_date_string,
+        occurrence.start_date,
+        occurrence.start_time,
+        occurrence.due_date.clone(),
+        occurrence.due_time,
+        occurrence.occurrence_key,
     ))
 }
 
@@ -690,6 +1014,12 @@ fn format_time(value: Time) -> AppResult<String> {
     value
         .format(TIME_FORMAT)
         .map_err(|error| AppError::Time(format!("格式化时间失败: {error}")))
+}
+
+fn format_date(value: Date) -> AppResult<String> {
+    value
+        .format(DATE_FORMAT)
+        .map_err(|error| AppError::Time(format!("格式化日期失败: {error}")))
 }
 
 fn time_to_seconds(value: Time) -> i64 {
@@ -746,18 +1076,80 @@ fn sort_key(task: &TaskListItemDto) -> (String, String, i64, String) {
         task.due_date.clone(),
         task.due_time.clone().unwrap_or_else(|| "00:00".to_string()),
         task.priority.unwrap_or(999),
-        task.series_id.clone(),
+        task.occurrence_key.clone(),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     use super::{
-        TaskCreateInput, TaskService, TaskSetStatusInput, TaskUpdateInput, UpcomingQueryInput,
+        build_schedule_seed, build_scheduled_occurrence, shift_recurrence_start, TaskCreateInput,
+        TaskService, TaskSetStatusInput, TaskUpdateInput, UpcomingQueryInput, TASK_KIND_RECURRING,
     };
-    use crate::{db::Database, repository::tag_repository::TagRepository};
+    use crate::{
+        db::{now_rfc3339, Database},
+        domain::{TaskOccurrenceOverride, TaskSeries, TaskSeriesRevision},
+        repository::{
+            tag_repository::TagRepository,
+            task_occurrence_override_repository::TaskOccurrenceOverrideRepository,
+            task_series_repository::TaskSeriesRepository,
+            task_series_revision_repository::TaskSeriesRevisionRepository,
+        },
+    };
+
+    fn insert_recurring_task(
+        database: &Database,
+        title: &str,
+        effective_from: &str,
+        recurrence_type: &str,
+        recurrence_interval: i64,
+        recurrence_until: Option<&str>,
+    ) -> (TaskSeries, TaskSeriesRevision) {
+        let now = now_rfc3339().expect("should build timestamp");
+        let series = TaskSeries {
+            id: Uuid::new_v4().to_string(),
+            kind: TASK_KIND_RECURRING.to_string(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            archived_at: None,
+        };
+        let revision = TaskSeriesRevision {
+            id: Uuid::new_v4().to_string(),
+            series_id: series.id.clone(),
+            effective_from: effective_from.to_string(),
+            effective_until: None,
+            title: title.to_string(),
+            note: Some("重复任务".to_string()),
+            tag_id: None,
+            priority: Some(2),
+            all_day: true,
+            start_at_time_part: None,
+            due_at_time_part: None,
+            duration_seconds: None,
+            recurrence_type: Some(recurrence_type.to_string()),
+            recurrence_interval: Some(recurrence_interval),
+            recurrence_rule_json: None,
+            recurrence_until: recurrence_until.map(str::to_string),
+            danger_offset_value: None,
+            danger_offset_unit: None,
+            danger_use_workday: false,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+
+        database
+            .with_transaction(|transaction| {
+                TaskSeriesRepository::create(transaction, &series)?;
+                TaskSeriesRevisionRepository::create(transaction, &revision)?;
+                Ok(())
+            })
+            .expect("should insert recurring task");
+
+        (series, revision)
+    }
 
     #[test]
     fn create_and_get_single_task_round_trip() {
@@ -1073,5 +1465,126 @@ mod tests {
         assert_eq!(editor.due_date, "2026-04-14");
         assert_eq!(editor.due_time.as_deref(), Some("19:00"));
         assert_eq!(editor.current_status, "pending");
+    }
+
+    #[test]
+    fn upcoming_query_expands_daily_recurring_tasks_within_window() {
+        let temp_dir = tempdir().expect("should create temp dir");
+        let db_path = temp_dir.path().join("todo.data.sqlite3");
+        let database = Database::open_at(&db_path).expect("should open database");
+
+        insert_recurring_task(
+            &database,
+            "隔天回顾",
+            "2026-04-10",
+            "day",
+            2,
+            Some("2026-04-18"),
+        );
+
+        let tasks = TaskService::upcoming_query(
+            &database,
+            UpcomingQueryInput {
+                start_date: Some("2026-04-13".to_string()),
+                day_count: Some(7),
+            },
+        )
+        .expect("should query recurring tasks");
+
+        let due_dates: Vec<String> = tasks.into_iter().map(|item| item.due_date).collect();
+        assert_eq!(due_dates, vec!["2026-04-14", "2026-04-16", "2026-04-18"]);
+    }
+
+    #[test]
+    fn upcoming_query_clamps_monthly_recurrence_to_month_end() {
+        let temp_dir = tempdir().expect("should create temp dir");
+        let db_path = temp_dir.path().join("todo.data.sqlite3");
+        let database = Database::open_at(&db_path).expect("should open database");
+
+        insert_recurring_task(
+            &database,
+            "月底对账",
+            "2026-01-31",
+            "month",
+            1,
+            Some("2026-04-30"),
+        );
+
+        let tasks = TaskService::upcoming_query(
+            &database,
+            UpcomingQueryInput {
+                start_date: Some("2026-02-01".to_string()),
+                day_count: Some(90),
+            },
+        )
+        .expect("should query monthly recurrence");
+
+        let due_dates: Vec<String> = tasks.into_iter().map(|item| item.due_date).collect();
+        assert_eq!(due_dates, vec!["2026-02-28", "2026-03-31", "2026-04-30"]);
+    }
+
+    #[test]
+    fn upcoming_query_applies_override_to_recurring_occurrence() {
+        let temp_dir = tempdir().expect("should create temp dir");
+        let db_path = temp_dir.path().join("todo.data.sqlite3");
+        let database = Database::open_at(&db_path).expect("should open database");
+
+        let (series, revision) =
+            insert_recurring_task(&database, "每周复盘", "2026-04-06", "week", 1, None);
+        let seed = build_schedule_seed(&revision).expect("should build schedule seed");
+        let occurrence = build_scheduled_occurrence(
+            &revision,
+            &seed,
+            shift_recurrence_start(seed.effective_from, "week", 1, 2).expect("should shift date"),
+            false,
+        )
+        .expect("should build occurrence");
+        let now = now_rfc3339().expect("should build timestamp");
+
+        database
+            .with_transaction(|transaction| {
+                TaskOccurrenceOverrideRepository::upsert(
+                    transaction,
+                    &TaskOccurrenceOverride {
+                        id: Uuid::new_v4().to_string(),
+                        series_id: series.id.clone(),
+                        occurrence_key: occurrence.occurrence_key.clone(),
+                        override_start_at: None,
+                        override_due_at: None,
+                        override_danger_at: None,
+                        override_title: Some("每周复盘（已确认）".to_string()),
+                        override_note: Some("已单次完成".to_string()),
+                        override_tag_id: None,
+                        override_priority: Some(1),
+                        status: "completed".to_string(),
+                        completed_at: Some(now.clone()),
+                        cancelled_at: None,
+                        detached_as_single: false,
+                        created_at: now.clone(),
+                        updated_at: now.clone(),
+                    },
+                )?;
+                Ok(())
+            })
+            .expect("should persist occurrence override");
+
+        let tasks = TaskService::upcoming_query(
+            &database,
+            UpcomingQueryInput {
+                start_date: Some("2026-04-20".to_string()),
+                day_count: Some(14),
+            },
+        )
+        .expect("should query recurring tasks with override");
+
+        let overridden = tasks
+            .into_iter()
+            .find(|item| item.occurrence_key == occurrence.occurrence_key)
+            .expect("overridden occurrence should exist");
+
+        assert_eq!(overridden.title, "每周复盘（已确认）");
+        assert_eq!(overridden.note.as_deref(), Some("已单次完成"));
+        assert_eq!(overridden.priority, Some(1));
+        assert_eq!(overridden.status, "completed");
     }
 }

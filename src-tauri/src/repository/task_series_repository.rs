@@ -67,6 +67,33 @@ impl TaskSeriesRepository {
         Ok(())
     }
 
+    pub fn list_active(connection: &Connection) -> AppResult<Vec<TaskSeries>> {
+        let mut statement = connection.prepare(
+            r#"
+        SELECT id, kind, created_at, updated_at, archived_at
+        FROM task_series
+        WHERE archived_at IS NULL
+        ORDER BY created_at ASC
+      "#,
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            Ok(TaskSeries {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+                archived_at: row.get(4)?,
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
     pub fn list_single_ids(connection: &Connection) -> AppResult<Vec<String>> {
         let mut statement = connection.prepare(
             r#"
