@@ -69,6 +69,9 @@
 - 截至 2026-04-14，阶段 4 已完成 `upcoming_query` 的重复实例展开首版，支持按天、周、月、年重复、间隔值、循环截止日期与稳定 `occurrence_key`。
 - 截至 2026-04-16，阶段 4 已补齐按小时重复展开；当前 `upcoming_query` 已支持按小时、天、周、月、年重复。
 - 截至 2026-04-16，阶段 4 的 Rust 测试已补到 26 个通过，阶段 4 验收条件已满足，可转入阶段 5。
+- 截至 2026-06-29，阶段 5 已完成 `task_create` 重复任务创建、`task_set_occurrence_status` 单次覆盖写入、`task_get_occurrence_detail` / `task_get_occurrence_editor` 单次覆盖读取投影、`task_update_template_from` 模板版本段截断与未来覆盖保留/清除策略、`task_delete` 重复任务整体删除。
+- 截至 2026-06-29，阶段 5 的 Rust 测试已补到 37 个通过，`npm run build` 与 `cargo tauri build --debug`（Windows）已通过。
+- 截至 2026-06-29，阶段 5 的 Android aarch64 Rust 交叉编译已通过，但 Tauri 符号链接创建受 TRAE 沙箱限制未能完成最终 APK 打包，需在非沙箱环境复验。
 
 ## 当前文档约定
 

@@ -12,7 +12,8 @@ use service::sync_service::{SyncMetaItemDto, SyncMetaSetInput, SyncService, Sync
 use service::tag_service::{TagCreateInput, TagDto, TagService, TagUpdateInput};
 use service::task_service::{
     TaskCreateInput, TaskDetailDto, TaskEditorDto, TaskListItemDto, TaskService,
-    TaskSetStatusInput, TaskUpdateInput, UpcomingQueryInput,
+    TaskSetOccurrenceStatusInput, TaskSetStatusInput, TaskUpdateInput, TaskUpdateTemplateFromInput,
+    UpcomingQueryInput,
 };
 use tauri::{Manager, State};
 
@@ -132,6 +133,26 @@ fn task_get_editor(
 }
 
 #[tauri::command]
+fn task_get_occurrence_detail(
+    state: State<'_, AppState>,
+    series_id: String,
+    occurrence_key: String,
+) -> CommandResult<Option<TaskDetailDto>> {
+    TaskService::get_occurrence_detail(&state.database, &series_id, &occurrence_key)
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+fn task_get_occurrence_editor(
+    state: State<'_, AppState>,
+    series_id: String,
+    occurrence_key: String,
+) -> CommandResult<Option<TaskEditorDto>> {
+    TaskService::get_occurrence_editor(&state.database, &series_id, &occurrence_key)
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
 fn task_update(state: State<'_, AppState>, input: TaskUpdateInput) -> CommandResult<TaskDetailDto> {
     TaskService::update_task(&state.database, input).map_err(CommandError::from)
 }
@@ -147,6 +168,22 @@ fn task_set_status(
     input: TaskSetStatusInput,
 ) -> CommandResult<TaskDetailDto> {
     TaskService::set_status(&state.database, input).map_err(CommandError::from)
+}
+
+#[tauri::command]
+fn task_set_occurrence_status(
+    state: State<'_, AppState>,
+    input: TaskSetOccurrenceStatusInput,
+) -> CommandResult<TaskDetailDto> {
+    TaskService::set_occurrence_status(&state.database, input).map_err(CommandError::from)
+}
+
+#[tauri::command]
+fn task_update_template_from(
+    state: State<'_, AppState>,
+    input: TaskUpdateTemplateFromInput,
+) -> CommandResult<TaskDetailDto> {
+    TaskService::update_template_from(&state.database, input).map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -189,9 +226,13 @@ pub fn run() {
             task_create,
             task_get_detail,
             task_get_editor,
+            task_get_occurrence_detail,
+            task_get_occurrence_editor,
             task_update,
             task_delete,
             task_set_status,
+            task_set_occurrence_status,
+            task_update_template_from,
             upcoming_query
         ])
         .run(tauri::generate_context!())

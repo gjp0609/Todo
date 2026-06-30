@@ -46,6 +46,9 @@ pub struct TaskCreateInput {
     pub start_time: Option<String>,
     pub due_date: String,
     pub due_time: Option<String>,
+    pub recurrence_type: Option<String>,
+    pub recurrence_interval: Option<i64>,
+    pub recurrence_until: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,6 +71,34 @@ pub struct TaskUpdateInput {
 pub struct TaskSetStatusInput {
     pub series_id: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskSetOccurrenceStatusInput {
+    pub series_id: String,
+    pub occurrence_key: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskUpdateTemplateFromInput {
+    pub series_id: String,
+    pub effective_from: String,
+    pub title: String,
+    pub note: Option<String>,
+    pub tag_id: Option<String>,
+    pub priority: Option<i64>,
+    pub all_day: bool,
+    pub start_date: Option<String>,
+    pub start_time: Option<String>,
+    pub due_date: String,
+    pub due_time: Option<String>,
+    pub recurrence_type: Option<String>,
+    pub recurrence_interval: Option<i64>,
+    pub recurrence_until: Option<String>,
+    pub clear_future_overrides: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -146,6 +177,14 @@ struct ParsedTaskInput {
     due_date: Date,
     due_time: Option<Time>,
     duration_seconds: Option<i64>,
+    recurrence: Option<ParsedRecurrence>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedRecurrence {
+    recurrence_type: String,
+    recurrence_interval: i64,
+    recurrence_until: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +219,11 @@ impl TaskService {
             .format(DATE_FORMAT)
             .map_err(|error| AppError::Time(format!("格式化实例键失败: {error}")))?;
         let now = now_rfc3339()?;
+        let kind = if parsed.recurrence.is_some() {
+            TASK_KIND_RECURRING
+        } else {
+            TASK_KIND_SINGLE
+        };
 
         database.with_transaction(|transaction| {
             if let Some(tag_id) = parsed.tag_id.as_deref() {
@@ -191,12 +235,22 @@ impl TaskService {
 
             let series = TaskSeries {
                 id: series_id.clone(),
-                kind: TASK_KIND_SINGLE.to_string(),
+                kind: kind.to_string(),
                 created_at: now.clone(),
                 updated_at: now.clone(),
                 archived_at: None,
             };
             TaskSeriesRepository::create(transaction, &series)?;
+
+            let (recurrence_type, recurrence_interval, recurrence_until) = match &parsed.recurrence
+            {
+                Some(value) => (
+                    Some(value.recurrence_type.clone()),
+                    Some(value.recurrence_interval),
+                    value.recurrence_until.clone(),
+                ),
+                None => (None, None, None),
+            };
 
             let revision = TaskSeriesRevision {
                 id: revision_id.clone(),
@@ -214,10 +268,10 @@ impl TaskService {
                 start_at_time_part: parsed.start_time.map(time_to_seconds),
                 due_at_time_part: parsed.due_time.map(time_to_seconds),
                 duration_seconds: parsed.duration_seconds,
-                recurrence_type: None,
-                recurrence_interval: None,
+                recurrence_type,
+                recurrence_interval,
                 recurrence_rule_json: None,
-                recurrence_until: None,
+                recurrence_until,
                 danger_offset_value: None,
                 danger_offset_unit: None,
                 danger_use_workday: false,
@@ -230,7 +284,7 @@ impl TaskService {
                 series_id: series_id.clone(),
                 revision_id: revision_id.clone(),
                 occurrence_key: occurrence_key.clone(),
-                kind: TASK_KIND_SINGLE.to_string(),
+                kind: kind.to_string(),
                 title: parsed.title.clone(),
                 note: parsed.note.clone(),
                 tag_id: parsed.tag_id.clone(),
@@ -289,6 +343,55 @@ impl TaskService {
         })
     }
 
+    pub fn get_occurrence_detail(
+        database: &Database,
+        series_id: &str,
+        occurrence_key: &str,
+    ) -> AppResult<Option<TaskDetailDto>> {
+        let occurrence_key = occurrence_key.trim();
+        if occurrence_key.is_empty() {
+            return Err(AppError::Validation("occurrence_key 不能为空".to_string()));
+        }
+
+        database.with_connection(|connection| {
+            Self::load_occurrence_detail(connection, series_id, occurrence_key)
+        })
+    }
+
+    pub fn get_occurrence_editor(
+        database: &Database,
+        series_id: &str,
+        occurrence_key: &str,
+    ) -> AppResult<Option<TaskEditorDto>> {
+        let occurrence_key = occurrence_key.trim();
+        if occurrence_key.is_empty() {
+            return Err(AppError::Validation("occurrence_key 不能为空".to_string()));
+        }
+
+        database.with_connection(|connection| {
+            let Some(detail) = Self::load_occurrence_detail(connection, series_id, occurrence_key)?
+            else {
+                return Ok(None);
+            };
+
+            Ok(Some(TaskEditorDto {
+                series_id: detail.series_id,
+                revision_id: detail.revision_id,
+                kind: detail.kind,
+                title: detail.title,
+                note: detail.note,
+                tag_id: detail.tag_id,
+                priority: detail.priority,
+                all_day: detail.all_day,
+                start_date: detail.start_date,
+                start_time: detail.start_time,
+                due_date: detail.due_date,
+                due_time: detail.due_time,
+                current_status: detail.status,
+            }))
+        })
+    }
+
     pub fn update_task(database: &Database, input: TaskUpdateInput) -> AppResult<TaskDetailDto> {
         let parsed = Self::validate_input(TaskCreateInput {
             title: input.title,
@@ -300,6 +403,9 @@ impl TaskService {
             start_time: input.start_time,
             due_date: input.due_date,
             due_time: input.due_time,
+            recurrence_type: None,
+            recurrence_interval: None,
+            recurrence_until: None,
         })?;
         let now = now_rfc3339()?;
 
@@ -366,8 +472,11 @@ impl TaskService {
         database.with_transaction(|transaction| {
             let series = TaskSeriesRepository::get_by_id(transaction, series_id)?
                 .ok_or_else(|| AppError::Validation("任务不存在".to_string()))?;
-            if series.kind != TASK_KIND_SINGLE {
-                return Err(AppError::Validation("当前仅支持删除单次任务".to_string()));
+            if series.kind != TASK_KIND_SINGLE && series.kind != TASK_KIND_RECURRING {
+                return Err(AppError::Validation(format!(
+                    "不支持删除任务类型: {}",
+                    series.kind
+                )));
             }
 
             TaskOccurrenceOverrideRepository::delete_by_series_id(transaction, series_id)?;
@@ -460,6 +569,247 @@ impl TaskService {
             TaskSeriesRepository::touch_updated_at(transaction, &input.series_id, &now)?;
 
             Self::build_task_detail(transaction, series, revision, occurrence_key)
+        })
+    }
+
+    pub fn set_occurrence_status(
+        database: &Database,
+        input: TaskSetOccurrenceStatusInput,
+    ) -> AppResult<TaskDetailDto> {
+        let status = normalize_status(&input.status)?;
+        let now = now_rfc3339()?;
+        let occurrence_key = input.occurrence_key.trim().to_string();
+        if occurrence_key.is_empty() {
+            return Err(AppError::Validation("occurrence_key 不能为空".to_string()));
+        }
+
+        database.with_transaction(|transaction| {
+            let series = TaskSeriesRepository::get_by_id(transaction, &input.series_id)?
+                .ok_or_else(|| AppError::Validation("任务不存在".to_string()))?;
+            if series.kind != TASK_KIND_RECURRING {
+                return Err(AppError::Validation(
+                    "单次任务请使用 task_set_status，重复实例请使用 task_set_occurrence_status".to_string(),
+                ));
+            }
+
+            let (revision_id, _start_anchor, _due_anchor) = parse_occurrence_key(&occurrence_key)?;
+            let revisions =
+                TaskSeriesRevisionRepository::list_by_series_id(transaction, &input.series_id)?;
+            let revision = revisions
+                .iter()
+                .find(|item| item.id == revision_id)
+                .ok_or_else(|| {
+                    AppError::Validation("occurrence_key 对应的版本段不存在".to_string())
+                })?
+                .clone();
+
+            let existing_override = TaskOccurrenceOverrideRepository::get_by_series_and_occurrence(
+                transaction,
+                &input.series_id,
+                &occurrence_key,
+            )?;
+            let created_at = existing_override
+                .as_ref()
+                .map(|value| value.created_at.clone())
+                .unwrap_or_else(|| now.clone());
+            let override_id = existing_override
+                .as_ref()
+                .map(|value| value.id.clone())
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+            let override_record = TaskOccurrenceOverride {
+                id: override_id,
+                series_id: input.series_id.clone(),
+                occurrence_key: occurrence_key.clone(),
+                override_start_at: existing_override
+                    .as_ref()
+                    .and_then(|value| value.override_start_at.clone()),
+                override_due_at: existing_override
+                    .as_ref()
+                    .and_then(|value| value.override_due_at.clone()),
+                override_danger_at: existing_override
+                    .as_ref()
+                    .and_then(|value| value.override_danger_at.clone()),
+                override_title: existing_override
+                    .as_ref()
+                    .and_then(|value| value.override_title.clone()),
+                override_note: existing_override
+                    .as_ref()
+                    .and_then(|value| value.override_note.clone()),
+                override_tag_id: existing_override
+                    .as_ref()
+                    .and_then(|value| value.override_tag_id.clone()),
+                override_priority: existing_override
+                    .as_ref()
+                    .and_then(|value| value.override_priority),
+                status: status.to_string(),
+                completed_at: if status == STATUS_COMPLETED {
+                    Some(now.clone())
+                } else {
+                    None
+                },
+                cancelled_at: if status == STATUS_CANCELLED {
+                    Some(now.clone())
+                } else {
+                    None
+                },
+                detached_as_single: existing_override
+                    .as_ref()
+                    .map(|value| value.detached_as_single)
+                    .unwrap_or(false),
+                created_at,
+                updated_at: now.clone(),
+            };
+
+            TaskOccurrenceOverrideRepository::upsert(transaction, &override_record)?;
+            TaskSeriesRepository::touch_updated_at(transaction, &input.series_id, &now)?;
+
+            Self::build_occurrence_detail(transaction, series, revision, occurrence_key)
+        })
+    }
+
+    pub fn update_template_from(
+        database: &Database,
+        input: TaskUpdateTemplateFromInput,
+    ) -> AppResult<TaskDetailDto> {
+        let parsed = Self::validate_input(TaskCreateInput {
+            title: input.title,
+            note: input.note,
+            tag_id: input.tag_id,
+            priority: input.priority,
+            all_day: input.all_day,
+            start_date: input.start_date,
+            start_time: input.start_time,
+            due_date: input.due_date,
+            due_time: input.due_time,
+            recurrence_type: input.recurrence_type,
+            recurrence_interval: input.recurrence_interval,
+            recurrence_until: input.recurrence_until,
+        })?;
+        let new_effective_from = parse_date(&input.effective_from, "新版本段生效日期")?;
+        let now = now_rfc3339()?;
+        let new_revision_id = Uuid::new_v4().to_string();
+
+        database.with_transaction(|transaction| {
+            let series = TaskSeriesRepository::get_by_id(transaction, &input.series_id)?
+                .ok_or_else(|| AppError::Validation("任务不存在".to_string()))?;
+            if series.kind != TASK_KIND_RECURRING {
+                return Err(AppError::Validation(
+                    "单次任务不支持模板版本段截断，请使用 task_update".to_string(),
+                ));
+            }
+
+            if let Some(tag_id) = parsed.tag_id.as_deref() {
+                let tag = TagRepository::get_by_id(transaction, tag_id)?;
+                if tag.is_none() {
+                    return Err(AppError::Validation("指定的标签不存在".to_string()));
+                }
+            }
+
+            let new_effective_from_str = new_effective_from
+                .format(DATE_FORMAT)
+                .map_err(|error| AppError::Time(format!("格式化新生效日期失败: {error}")))?;
+            let old_effective_until_str = (new_effective_from - Duration::days(1))
+                .format(DATE_FORMAT)
+                .map_err(|error| AppError::Time(format!("格式化旧版本段截止日期失败: {error}")))?;
+
+            let mut revisions = TaskSeriesRevisionRepository::list_by_series_id(
+                transaction,
+                &input.series_id,
+            )?;
+            for mut revision in revisions.drain(..) {
+                let revision_effective_from =
+                    parse_date(&revision.effective_from, "版本段生效日期")?;
+                if revision_effective_from >= new_effective_from {
+                    TaskSeriesRevisionRepository::delete_by_id(transaction, &revision.id)?;
+                } else {
+                    let needs_truncate = revision
+                        .effective_until
+                        .as_deref()
+                        .map(|value| parse_date(value, "版本段截止日期"))
+                        .transpose()?
+                        .map(|until| until >= new_effective_from)
+                        .unwrap_or(true);
+                    if needs_truncate {
+                        revision.effective_until = Some(old_effective_until_str.clone());
+                        revision.updated_at = now.clone();
+                        TaskSeriesRevisionRepository::update(transaction, &revision)?;
+                    }
+                }
+            }
+
+            let (recurrence_type, recurrence_interval, recurrence_until) = match &parsed.recurrence
+            {
+                Some(value) => (
+                    Some(value.recurrence_type.clone()),
+                    Some(value.recurrence_interval),
+                    value.recurrence_until.clone(),
+                ),
+                None => (None, None, None),
+            };
+
+            let new_revision = TaskSeriesRevision {
+                id: new_revision_id.clone(),
+                series_id: input.series_id.clone(),
+                effective_from: new_effective_from_str,
+                effective_until: None,
+                title: parsed.title.clone(),
+                note: parsed.note.clone(),
+                tag_id: parsed.tag_id.clone(),
+                priority: parsed.priority,
+                all_day: parsed.all_day,
+                start_at_time_part: parsed.start_time.map(time_to_seconds),
+                due_at_time_part: parsed.due_time.map(time_to_seconds),
+                duration_seconds: parsed.duration_seconds,
+                recurrence_type,
+                recurrence_interval,
+                recurrence_rule_json: None,
+                recurrence_until,
+                danger_offset_value: None,
+                danger_offset_unit: None,
+                danger_use_workday: false,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            };
+            TaskSeriesRevisionRepository::create(transaction, &new_revision)?;
+
+            if input.clear_future_overrides {
+                let overrides = TaskOccurrenceOverrideRepository::list_by_series_id(
+                    transaction,
+                    &input.series_id,
+                )?;
+                for override_record in overrides {
+                    if let Ok((_revision_id, _start_anchor, due_anchor)) =
+                        parse_occurrence_key(&override_record.occurrence_key)
+                    {
+                        if due_anchor.date() >= new_effective_from {
+                            TaskOccurrenceOverrideRepository::delete_by_id(
+                                transaction,
+                                &override_record.id,
+                            )?;
+                        }
+                    }
+                }
+            }
+
+            TaskSeriesRepository::touch_updated_at(transaction, &input.series_id, &now)?;
+
+            let updated_series =
+                TaskSeriesRepository::get_by_id(transaction, &input.series_id)?
+                    .ok_or_else(|| AppError::State("更新后任务不存在".to_string()))?;
+            let seed = build_schedule_seed(&new_revision)?;
+            let occurrence = build_scheduled_occurrence(
+                &new_revision,
+                &seed,
+                seed.effective_from,
+                false,
+            )?;
+            Self::build_occurrence_detail(
+                transaction,
+                updated_series,
+                new_revision,
+                occurrence.occurrence_key,
+            )
         })
     }
 
@@ -580,6 +930,12 @@ impl TaskService {
                 Some((due_anchor - start_anchor).whole_seconds())
             };
 
+        let recurrence = Self::validate_recurrence(
+            input.recurrence_type,
+            input.recurrence_interval,
+            input.recurrence_until,
+        )?;
+
         Ok(ParsedTaskInput {
             title,
             note: normalize_optional_text(input.note),
@@ -591,7 +947,54 @@ impl TaskService {
             due_date,
             due_time,
             duration_seconds,
+            recurrence,
         })
+    }
+
+    fn validate_recurrence(
+        recurrence_type: Option<String>,
+        recurrence_interval: Option<i64>,
+        recurrence_until: Option<String>,
+    ) -> AppResult<Option<ParsedRecurrence>> {
+        let Some(recurrence_type) = recurrence_type else {
+            if recurrence_interval.is_some() || recurrence_until.is_some() {
+                return Err(AppError::Validation(
+                    "重复间隔或循环截止日期需要同时填写重复类型".to_string(),
+                ));
+            }
+            return Ok(None);
+        };
+
+        let normalized_type = recurrence_type.trim().to_lowercase();
+        match normalized_type.as_str() {
+            RECURRENCE_HOUR | RECURRENCE_DAY | RECURRENCE_WEEK | RECURRENCE_MONTH
+            | RECURRENCE_YEAR => {}
+            other => {
+                return Err(AppError::Validation(format!(
+                    "重复类型仅支持 hour、day、week、month、year，收到: {other}"
+                )));
+            }
+        }
+
+        let recurrence_interval = recurrence_interval.unwrap_or(1);
+        if recurrence_interval <= 0 {
+            return Err(AppError::Validation("重复间隔必须大于 0".to_string()));
+        }
+
+        let recurrence_until = recurrence_until
+            .map(|value| {
+                parse_date(&value, "循环截止日期").map(|date| {
+                    date.format(DATE_FORMAT)
+                        .map_err(|error| AppError::Time(format!("格式化循环截止日期失败: {error}")))
+                })?
+            })
+            .transpose()?;
+
+        Ok(Some(ParsedRecurrence {
+            recurrence_type: normalized_type,
+            recurrence_interval,
+            recurrence_until,
+        }))
     }
 
     fn build_task_detail(
@@ -613,6 +1016,74 @@ impl TaskService {
             series_id: series.id,
             revision_id: revision.id,
             occurrence_key: detail_occurrence_key,
+            kind: series.kind,
+            title: occurrence_override
+                .as_ref()
+                .and_then(|value| value.override_title.clone())
+                .unwrap_or(revision.title),
+            note: occurrence_override
+                .as_ref()
+                .and_then(|value| value.override_note.clone())
+                .or(revision.note),
+            tag_id: occurrence_override
+                .as_ref()
+                .and_then(|value| value.override_tag_id.clone())
+                .or(revision.tag_id),
+            priority: occurrence_override
+                .as_ref()
+                .and_then(|value| value.override_priority)
+                .or(revision.priority),
+            all_day: revision.all_day,
+            start_date,
+            start_time,
+            due_date,
+            due_time,
+            status: occurrence_override
+                .as_ref()
+                .map(|value| value.status.clone())
+                .unwrap_or_else(|| STATUS_PENDING.to_string()),
+            completed_at: occurrence_override
+                .as_ref()
+                .and_then(|value| value.completed_at.clone()),
+            cancelled_at: occurrence_override
+                .as_ref()
+                .and_then(|value| value.cancelled_at.clone()),
+        })
+    }
+
+    fn build_occurrence_detail(
+        connection: &rusqlite::Connection,
+        series: TaskSeries,
+        revision: TaskSeriesRevision,
+        occurrence_key: String,
+    ) -> AppResult<TaskDetailDto> {
+        let (_revision_id, start_anchor, due_anchor) = parse_occurrence_key(&occurrence_key)?;
+        let occurrence_override = TaskOccurrenceOverrideRepository::get_by_series_and_occurrence(
+            connection,
+            &series.id,
+            &occurrence_key,
+        )?;
+
+        let (start_date, start_time, due_date, due_time) = if revision.all_day {
+            (
+                Some(format_date(start_anchor.date())?),
+                None,
+                format_date(due_anchor.date())?,
+                None,
+            )
+        } else {
+            (
+                Some(format_date(start_anchor.date())?),
+                Some(format_time(start_anchor.time())?),
+                format_date(due_anchor.date())?,
+                Some(format_time(due_anchor.time())?),
+            )
+        };
+
+        Ok(TaskDetailDto {
+            series_id: series.id,
+            revision_id: revision.id,
+            occurrence_key,
             kind: series.kind,
             title: occurrence_override
                 .as_ref()
@@ -670,6 +1141,34 @@ impl TaskService {
         let occurrence_key = reconstruct_task_schedule(&revision)?.4;
 
         Self::build_task_detail(connection, series, revision, occurrence_key).map(Some)
+    }
+
+    fn load_occurrence_detail(
+        connection: &rusqlite::Connection,
+        series_id: &str,
+        occurrence_key: &str,
+    ) -> AppResult<Option<TaskDetailDto>> {
+        let series = match TaskSeriesRepository::get_by_id(connection, series_id)? {
+            Some(series) => series,
+            None => return Ok(None),
+        };
+        if series.kind != TASK_KIND_RECURRING {
+            return Err(AppError::Validation(
+                "单次任务请使用 task_get_detail，重复实例请使用 task_get_occurrence_detail".to_string(),
+            ));
+        }
+
+        let (revision_id, _start_anchor, _due_anchor) = parse_occurrence_key(occurrence_key)?;
+        let revisions = TaskSeriesRevisionRepository::list_by_series_id(connection, series_id)?;
+        let revision = revisions
+            .into_iter()
+            .find(|item| item.id == revision_id)
+            .ok_or_else(|| {
+                AppError::Validation("occurrence_key 对应的版本段不存在".to_string())
+            })?;
+
+        Self::build_occurrence_detail(connection, series, revision, occurrence_key.to_string())
+            .map(Some)
     }
 }
 
@@ -929,6 +1428,36 @@ fn format_occurrence_anchor(value: PrimitiveDateTime) -> String {
     )
 }
 
+const OCCURRENCE_ANCHOR_FORMAT: &[time::format_description::FormatItem<'static>] =
+    format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
+
+fn parse_occurrence_key(
+    occurrence_key: &str,
+) -> AppResult<(String, PrimitiveDateTime, PrimitiveDateTime)> {
+    let mut parts = occurrence_key.splitn(3, '|');
+    let revision_id = parts
+        .next()
+        .ok_or_else(|| AppError::Validation("occurrence_key 缺少 revision_id 段".to_string()))?
+        .to_string();
+    let start_anchor_str = parts.next().ok_or_else(|| {
+        AppError::Validation("occurrence_key 缺少开始锚点段".to_string())
+    })?;
+    let due_anchor_str = parts.next().ok_or_else(|| {
+        AppError::Validation("occurrence_key 缺少截止锚点段".to_string())
+    })?;
+
+    let start_anchor = PrimitiveDateTime::parse(start_anchor_str, OCCURRENCE_ANCHOR_FORMAT)
+        .map_err(|error| {
+            AppError::Validation(format!("occurrence_key 开始锚点格式无效: {error}"))
+        })?;
+    let due_anchor = PrimitiveDateTime::parse(due_anchor_str, OCCURRENCE_ANCHOR_FORMAT)
+        .map_err(|error| {
+            AppError::Validation(format!("occurrence_key 截止锚点格式无效: {error}"))
+        })?;
+
+    Ok((revision_id, start_anchor, due_anchor))
+}
+
 fn initial_occurrence_index(
     recurrence_type: &str,
     first_due_date: Date,
@@ -1181,8 +1710,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        build_schedule_seed, build_scheduled_occurrence, shift_recurrence_start, TaskCreateInput,
-        TaskService, TaskSetStatusInput, TaskUpdateInput, UpcomingQueryInput, TASK_KIND_RECURRING,
+        build_schedule_seed, build_scheduled_occurrence, parse_occurrence_key,
+        shift_recurrence_start, TaskCreateInput, TaskService, TaskSetOccurrenceStatusInput,
+        TaskSetStatusInput, TaskUpdateInput, TaskUpdateTemplateFromInput, UpcomingQueryInput,
+        TASK_KIND_RECURRING,
     };
     use crate::{
         db::{now_rfc3339, Database},
@@ -1290,6 +1821,9 @@ mod tests {
                 start_time: Some("09:00".to_string()),
                 due_date: "2026-04-14".to_string(),
                 due_time: Some("18:30".to_string()),
+                recurrence_type: None,
+                recurrence_interval: None,
+                recurrence_until: None,
             },
         )
         .expect("should create task");
@@ -1325,6 +1859,9 @@ mod tests {
                 start_time: None,
                 due_date: "2026-04-13".to_string(),
                 due_time: None,
+                recurrence_type: None,
+                recurrence_interval: None,
+                recurrence_until: None,
             },
         );
 
@@ -1354,6 +1891,9 @@ mod tests {
                 start_time: None,
                 due_date: "2026-04-15".to_string(),
                 due_time: None,
+                recurrence_type: None,
+                recurrence_interval: None,
+                recurrence_until: None,
             },
         )
         .expect("should create task");
@@ -1381,6 +1921,9 @@ mod tests {
                 start_time: Some("08:00".to_string()),
                 due_date: "2026-04-13".to_string(),
                 due_time: Some("18:00".to_string()),
+                recurrence_type: None,
+                recurrence_interval: None,
+                recurrence_until: None,
             },
         )
         .expect("should create task");
@@ -1427,6 +1970,9 @@ mod tests {
                 start_time: None,
                 due_date: "2026-04-13".to_string(),
                 due_time: None,
+                recurrence_type: None,
+                recurrence_interval: None,
+                recurrence_until: None,
             },
         )
         .expect("should create task");
@@ -1472,6 +2018,9 @@ mod tests {
                 start_time: None,
                 due_date: "2026-04-13".to_string(),
                 due_time: None,
+                recurrence_type: None,
+                recurrence_interval: None,
+                recurrence_until: None,
             },
         )
         .expect("should create task");
@@ -1501,6 +2050,9 @@ mod tests {
                 start_time: Some("11:00".to_string()),
                 due_date: "2026-04-16".to_string(),
                 due_time: Some("10:00".to_string()),
+                recurrence_type: None,
+                recurrence_interval: None,
+                recurrence_until: None,
             },
         )
         .expect("should create task 1");
@@ -1517,6 +2069,9 @@ mod tests {
                 start_time: Some("09:00".to_string()),
                 due_date: "2026-04-14".to_string(),
                 due_time: Some("09:30".to_string()),
+                recurrence_type: None,
+                recurrence_interval: None,
+                recurrence_until: None,
             },
         )
         .expect("should create task 2");
@@ -1533,6 +2088,9 @@ mod tests {
                 start_time: None,
                 due_date: "2026-05-01".to_string(),
                 due_time: None,
+                recurrence_type: None,
+                recurrence_interval: None,
+                recurrence_until: None,
             },
         )
         .expect("should create task 3");
@@ -1569,6 +2127,9 @@ mod tests {
                 start_time: Some("08:30".to_string()),
                 due_date: "2026-04-14".to_string(),
                 due_time: Some("19:00".to_string()),
+                recurrence_type: None,
+                recurrence_interval: None,
+                recurrence_until: None,
             },
         )
         .expect("should create task");
@@ -1586,6 +2147,641 @@ mod tests {
         assert_eq!(editor.due_date, "2026-04-14");
         assert_eq!(editor.due_time.as_deref(), Some("19:00"));
         assert_eq!(editor.current_status, "pending");
+    }
+
+    #[test]
+    fn create_task_with_recurrence_builds_recurring_series() {
+        let temp_dir = tempdir().expect("should create temp dir");
+        let db_path = temp_dir.path().join("todo.data.sqlite3");
+        let database = Database::open_at(&db_path).expect("should open database");
+
+        let created = TaskService::create_task(
+            &database,
+            TaskCreateInput {
+                title: "每周复盘".to_string(),
+                note: None,
+                tag_id: None,
+                priority: Some(2),
+                all_day: true,
+                start_date: Some("2026-04-06".to_string()),
+                start_time: None,
+                due_date: "2026-04-06".to_string(),
+                due_time: None,
+                recurrence_type: Some("week".to_string()),
+                recurrence_interval: Some(1),
+                recurrence_until: None,
+            },
+        )
+        .expect("should create recurring task");
+
+        assert_eq!(created.kind, "recurring");
+        assert_eq!(created.due_date, "2026-04-06");
+
+        let tasks = TaskService::upcoming_query(
+            &database,
+            UpcomingQueryInput {
+                start_date: Some("2026-04-06".to_string()),
+                day_count: Some(21),
+            },
+        )
+        .expect("should query recurring tasks");
+
+        let due_dates: Vec<String> = tasks.into_iter().map(|item| item.due_date).collect();
+        assert_eq!(
+            due_dates,
+            vec!["2026-04-06", "2026-04-13", "2026-04-20"]
+        );
+    }
+
+    #[test]
+    fn create_task_validates_recurrence_fields() {
+        let temp_dir = tempdir().expect("should create temp dir");
+        let db_path = temp_dir.path().join("todo.data.sqlite3");
+        let database = Database::open_at(&db_path).expect("should open database");
+
+        let invalid_type = TaskService::create_task(
+            &database,
+            TaskCreateInput {
+                title: "非法重复类型".to_string(),
+                note: None,
+                tag_id: None,
+                priority: None,
+                all_day: true,
+                start_date: None,
+                start_time: None,
+                due_date: "2026-04-13".to_string(),
+                due_time: None,
+                recurrence_type: Some("fortnight".to_string()),
+                recurrence_interval: None,
+                recurrence_until: None,
+            },
+        );
+        assert!(invalid_type.is_err());
+
+        let invalid_interval = TaskService::create_task(
+            &database,
+            TaskCreateInput {
+                title: "非法间隔".to_string(),
+                note: None,
+                tag_id: None,
+                priority: None,
+                all_day: true,
+                start_date: None,
+                start_time: None,
+                due_date: "2026-04-13".to_string(),
+                due_time: None,
+                recurrence_type: Some("day".to_string()),
+                recurrence_interval: Some(0),
+                recurrence_until: None,
+            },
+        );
+        assert!(invalid_interval.is_err());
+
+        let orphan_until = TaskService::create_task(
+            &database,
+            TaskCreateInput {
+                title: "缺类型".to_string(),
+                note: None,
+                tag_id: None,
+                priority: None,
+                all_day: true,
+                start_date: None,
+                start_time: None,
+                due_date: "2026-04-13".to_string(),
+                due_time: None,
+                recurrence_type: None,
+                recurrence_interval: None,
+                recurrence_until: Some("2026-05-01".to_string()),
+            },
+        );
+        assert!(orphan_until.is_err());
+    }
+
+    #[test]
+    fn set_occurrence_status_marks_single_instance_without_affecting_others() {
+        let temp_dir = tempdir().expect("should create temp dir");
+        let db_path = temp_dir.path().join("todo.data.sqlite3");
+        let database = Database::open_at(&db_path).expect("should open database");
+
+        let created = TaskService::create_task(
+            &database,
+            TaskCreateInput {
+                title: "每日站会".to_string(),
+                note: None,
+                tag_id: None,
+                priority: Some(2),
+                all_day: true,
+                start_date: Some("2026-04-13".to_string()),
+                start_time: None,
+                due_date: "2026-04-13".to_string(),
+                due_time: None,
+                recurrence_type: Some("day".to_string()),
+                recurrence_interval: Some(1),
+                recurrence_until: None,
+            },
+        )
+        .expect("should create recurring task");
+
+        let tasks = TaskService::upcoming_query(
+            &database,
+            UpcomingQueryInput {
+                start_date: Some("2026-04-13".to_string()),
+                day_count: Some(3),
+            },
+        )
+        .expect("should query recurring tasks");
+        assert_eq!(tasks.len(), 3);
+
+        let target_key = tasks[1].occurrence_key.clone();
+        TaskService::set_occurrence_status(
+            &database,
+            TaskSetOccurrenceStatusInput {
+                series_id: created.series_id.clone(),
+                occurrence_key: target_key.clone(),
+                status: "completed".to_string(),
+            },
+        )
+        .expect("should set occurrence status");
+
+        let after = TaskService::upcoming_query(
+            &database,
+            UpcomingQueryInput {
+                start_date: Some("2026-04-13".to_string()),
+                day_count: Some(3),
+            },
+        )
+        .expect("should query after override");
+        let overridden = after
+            .iter()
+            .find(|item| item.occurrence_key == target_key)
+            .expect("overridden occurrence should exist");
+        assert_eq!(overridden.status, "completed");
+        let others: Vec<&str> = after
+            .iter()
+            .filter(|item| item.occurrence_key != target_key)
+            .map(|item| item.status.as_str())
+            .collect();
+        assert_eq!(others, vec!["pending", "pending"]);
+    }
+
+    #[test]
+    fn set_occurrence_status_skip_equivalent_to_cancelled() {
+        let temp_dir = tempdir().expect("should create temp dir");
+        let db_path = temp_dir.path().join("todo.data.sqlite3");
+        let database = Database::open_at(&db_path).expect("should open database");
+
+        let created = TaskService::create_task(
+            &database,
+            TaskCreateInput {
+                title: "每周复盘".to_string(),
+                note: None,
+                tag_id: None,
+                priority: None,
+                all_day: true,
+                start_date: Some("2026-04-06".to_string()),
+                start_time: None,
+                due_date: "2026-04-06".to_string(),
+                due_time: None,
+                recurrence_type: Some("week".to_string()),
+                recurrence_interval: Some(1),
+                recurrence_until: None,
+            },
+        )
+        .expect("should create recurring task");
+
+        let tasks = TaskService::upcoming_query(
+            &database,
+            UpcomingQueryInput {
+                start_date: Some("2026-04-06".to_string()),
+                day_count: Some(7),
+            },
+        )
+        .expect("should query recurring tasks");
+        let target_key = tasks[0].occurrence_key.clone();
+
+        let detail = TaskService::set_occurrence_status(
+            &database,
+            TaskSetOccurrenceStatusInput {
+                series_id: created.series_id.clone(),
+                occurrence_key: target_key.clone(),
+                status: "cancelled".to_string(),
+            },
+        )
+        .expect("should skip occurrence");
+        assert_eq!(detail.status, "cancelled");
+        assert!(detail.cancelled_at.is_some());
+        assert_eq!(detail.occurrence_key, target_key);
+    }
+
+    #[test]
+    fn set_occurrence_status_rejects_single_task() {
+        let temp_dir = tempdir().expect("should create temp dir");
+        let db_path = temp_dir.path().join("todo.data.sqlite3");
+        let database = Database::open_at(&db_path).expect("should open database");
+
+        let created = TaskService::create_task(
+            &database,
+            TaskCreateInput {
+                title: "单次任务".to_string(),
+                note: None,
+                tag_id: None,
+                priority: None,
+                all_day: true,
+                start_date: Some("2026-04-13".to_string()),
+                start_time: None,
+                due_date: "2026-04-13".to_string(),
+                due_time: None,
+                recurrence_type: None,
+                recurrence_interval: None,
+                recurrence_until: None,
+            },
+        )
+        .expect("should create single task");
+
+        let result = TaskService::set_occurrence_status(
+            &database,
+            TaskSetOccurrenceStatusInput {
+                series_id: created.series_id,
+                occurrence_key: "2026-04-13".to_string(),
+                status: "completed".to_string(),
+            },
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_occurrence_key_round_trips_with_builder() {
+        let revision_id = "rev-123";
+        let start = time::PrimitiveDateTime::new(
+            time::Date::from_calendar_date(2026, time::Month::April, 13).unwrap(),
+            time::Time::from_hms(9, 30, 0).unwrap(),
+        );
+        let due = time::PrimitiveDateTime::new(
+            time::Date::from_calendar_date(2026, time::Month::April, 14).unwrap(),
+            time::Time::from_hms(18, 0, 0).unwrap(),
+        );
+        let key = super::build_recurrence_occurrence_key(revision_id, start, due);
+        let parsed = parse_occurrence_key(&key).expect("should parse");
+        assert_eq!(parsed.0, revision_id);
+        assert_eq!(parsed.1, start);
+        assert_eq!(parsed.2, due);
+    }
+
+    #[test]
+    fn get_occurrence_detail_and_editor_reflect_override() {
+        let temp_dir = tempdir().expect("should create temp dir");
+        let db_path = temp_dir.path().join("todo.data.sqlite3");
+        let database = Database::open_at(&db_path).expect("should open database");
+
+        let created = TaskService::create_task(
+            &database,
+            TaskCreateInput {
+                title: "每周周报".to_string(),
+                note: Some("模板备注".to_string()),
+                tag_id: None,
+                priority: Some(2),
+                all_day: true,
+                start_date: Some("2026-04-06".to_string()),
+                start_time: None,
+                due_date: "2026-04-06".to_string(),
+                due_time: None,
+                recurrence_type: Some("week".to_string()),
+                recurrence_interval: Some(1),
+                recurrence_until: None,
+            },
+        )
+        .expect("should create recurring task");
+
+        let tasks = TaskService::upcoming_query(
+            &database,
+            UpcomingQueryInput {
+                start_date: Some("2026-04-06".to_string()),
+                day_count: Some(14),
+            },
+        )
+        .expect("should query recurring tasks");
+        let target_key = tasks[1].occurrence_key.clone();
+
+        TaskService::set_occurrence_status(
+            &database,
+            TaskSetOccurrenceStatusInput {
+                series_id: created.series_id.clone(),
+                occurrence_key: target_key.clone(),
+                status: "completed".to_string(),
+            },
+        )
+        .expect("should set occurrence status");
+
+        let detail = TaskService::get_occurrence_detail(&database, &created.series_id, &target_key)
+            .expect("should get occurrence detail")
+            .expect("detail should exist");
+        assert_eq!(detail.occurrence_key, target_key);
+        assert_eq!(detail.title, "每周周报");
+        assert_eq!(detail.status, "completed");
+        assert!(detail.completed_at.is_some());
+
+        let editor =
+            TaskService::get_occurrence_editor(&database, &created.series_id, &target_key)
+                .expect("should get occurrence editor")
+                .expect("editor should exist");
+        assert_eq!(editor.series_id, created.series_id);
+        assert_eq!(editor.kind, "recurring");
+        assert_eq!(editor.title, "每周周报");
+        assert_eq!(editor.current_status, "completed");
+    }
+
+    #[test]
+    fn delete_task_removes_recurring_series_with_all_overrides() {
+        let temp_dir = tempdir().expect("should create temp dir");
+        let db_path = temp_dir.path().join("todo.data.sqlite3");
+        let database = Database::open_at(&db_path).expect("should open database");
+
+        let created = TaskService::create_task(
+            &database,
+            TaskCreateInput {
+                title: "每日打卡".to_string(),
+                note: None,
+                tag_id: None,
+                priority: None,
+                all_day: true,
+                start_date: Some("2026-04-13".to_string()),
+                start_time: None,
+                due_date: "2026-04-13".to_string(),
+                due_time: None,
+                recurrence_type: Some("day".to_string()),
+                recurrence_interval: Some(1),
+                recurrence_until: None,
+            },
+        )
+        .expect("should create recurring task");
+
+        let tasks = TaskService::upcoming_query(
+            &database,
+            UpcomingQueryInput {
+                start_date: Some("2026-04-13".to_string()),
+                day_count: Some(3),
+            },
+        )
+        .expect("should query recurring tasks");
+        TaskService::set_occurrence_status(
+            &database,
+            TaskSetOccurrenceStatusInput {
+                series_id: created.series_id.clone(),
+                occurrence_key: tasks[0].occurrence_key.clone(),
+                status: "completed".to_string(),
+            },
+        )
+        .expect("should set occurrence status");
+
+        TaskService::delete_task(&database, &created.series_id)
+            .expect("should delete recurring task");
+
+        let after = TaskService::upcoming_query(
+            &database,
+            UpcomingQueryInput {
+                start_date: Some("2026-04-13".to_string()),
+                day_count: Some(3),
+            },
+        )
+        .expect("should query after delete");
+        assert!(after.is_empty());
+    }
+
+    #[test]
+    fn update_template_from_isolates_history_and_affects_future() {
+        let temp_dir = tempdir().expect("should create temp dir");
+        let db_path = temp_dir.path().join("todo.data.sqlite3");
+        let database = Database::open_at(&db_path).expect("should open database");
+
+        let created = TaskService::create_task(
+            &database,
+            TaskCreateInput {
+                title: "旧模板标题".to_string(),
+                note: None,
+                tag_id: None,
+                priority: Some(1),
+                all_day: true,
+                start_date: Some("2026-04-06".to_string()),
+                start_time: None,
+                due_date: "2026-04-06".to_string(),
+                due_time: None,
+                recurrence_type: Some("week".to_string()),
+                recurrence_interval: Some(1),
+                recurrence_until: None,
+            },
+        )
+        .expect("should create recurring task");
+
+        TaskService::update_template_from(
+            &database,
+            TaskUpdateTemplateFromInput {
+                series_id: created.series_id.clone(),
+                effective_from: "2026-05-04".to_string(),
+                title: "新模板标题".to_string(),
+                note: Some("新备注".to_string()),
+                tag_id: None,
+                priority: Some(3),
+                all_day: true,
+                start_date: Some("2026-05-04".to_string()),
+                start_time: None,
+                due_date: "2026-05-04".to_string(),
+                due_time: None,
+                recurrence_type: Some("week".to_string()),
+                recurrence_interval: Some(1),
+                recurrence_until: None,
+                clear_future_overrides: false,
+            },
+        )
+        .expect("should update template from");
+
+        let tasks = TaskService::upcoming_query(
+            &database,
+            UpcomingQueryInput {
+                start_date: Some("2026-04-06".to_string()),
+                day_count: Some(42),
+            },
+        )
+        .expect("should query after template update");
+
+        let before: Vec<&str> = tasks
+            .iter()
+            .filter(|item| item.due_date.as_str() < "2026-05-04")
+            .map(|item| item.title.as_str())
+            .collect();
+        assert_eq!(before, vec!["旧模板标题", "旧模板标题", "旧模板标题", "旧模板标题"]);
+
+        let from_cutoff: Vec<&str> = tasks
+            .iter()
+            .filter(|item| item.due_date.as_str() >= "2026-05-04")
+            .map(|item| item.title.as_str())
+            .collect();
+        assert_eq!(from_cutoff, vec!["新模板标题", "新模板标题"]);
+
+        let new_priority: Vec<i64> = tasks
+            .iter()
+            .filter(|item| item.due_date.as_str() >= "2026-05-04")
+            .map(|item| item.priority.unwrap_or(0))
+            .collect();
+        assert_eq!(new_priority, vec![3, 3]);
+    }
+
+    #[test]
+    fn update_template_from_preserves_existing_overrides_by_default() {
+        let temp_dir = tempdir().expect("should create temp dir");
+        let db_path = temp_dir.path().join("todo.data.sqlite3");
+        let database = Database::open_at(&db_path).expect("should open database");
+
+        let created = TaskService::create_task(
+            &database,
+            TaskCreateInput {
+                title: "每日例会".to_string(),
+                note: None,
+                tag_id: None,
+                priority: None,
+                all_day: true,
+                start_date: Some("2026-04-13".to_string()),
+                start_time: None,
+                due_date: "2026-04-13".to_string(),
+                due_time: None,
+                recurrence_type: Some("day".to_string()),
+                recurrence_interval: Some(1),
+                recurrence_until: None,
+            },
+        )
+        .expect("should create recurring task");
+
+        let tasks = TaskService::upcoming_query(
+            &database,
+            UpcomingQueryInput {
+                start_date: Some("2026-04-13".to_string()),
+                day_count: Some(5),
+            },
+        )
+        .expect("should query recurring tasks");
+        let future_key = tasks[4].occurrence_key.clone();
+        TaskService::set_occurrence_status(
+            &database,
+            TaskSetOccurrenceStatusInput {
+                series_id: created.series_id.clone(),
+                occurrence_key: future_key.clone(),
+                status: "completed".to_string(),
+            },
+        )
+        .expect("should set occurrence status");
+
+        TaskService::update_template_from(
+            &database,
+            TaskUpdateTemplateFromInput {
+                series_id: created.series_id.clone(),
+                effective_from: "2026-04-15".to_string(),
+                title: "新例会".to_string(),
+                note: None,
+                tag_id: None,
+                priority: None,
+                all_day: true,
+                start_date: Some("2026-04-15".to_string()),
+                start_time: None,
+                due_date: "2026-04-15".to_string(),
+                due_time: None,
+                recurrence_type: Some("day".to_string()),
+                recurrence_interval: Some(1),
+                recurrence_until: None,
+                clear_future_overrides: false,
+            },
+        )
+        .expect("should update template from");
+
+        let detail = TaskService::get_occurrence_detail(
+            &database,
+            &created.series_id,
+            &future_key,
+        )
+        .expect("should get occurrence detail")
+        .expect("detail should exist");
+        assert_eq!(detail.status, "completed");
+    }
+
+    #[test]
+    fn update_template_from_clears_future_overrides_when_requested() {
+        let temp_dir = tempdir().expect("should create temp dir");
+        let db_path = temp_dir.path().join("todo.data.sqlite3");
+        let database = Database::open_at(&db_path).expect("should open database");
+
+        let created = TaskService::create_task(
+            &database,
+            TaskCreateInput {
+                title: "每日提醒".to_string(),
+                note: None,
+                tag_id: None,
+                priority: None,
+                all_day: true,
+                start_date: Some("2026-04-13".to_string()),
+                start_time: None,
+                due_date: "2026-04-13".to_string(),
+                due_time: None,
+                recurrence_type: Some("day".to_string()),
+                recurrence_interval: Some(1),
+                recurrence_until: None,
+            },
+        )
+        .expect("should create recurring task");
+
+        let tasks = TaskService::upcoming_query(
+            &database,
+            UpcomingQueryInput {
+                start_date: Some("2026-04-13".to_string()),
+                day_count: Some(5),
+            },
+        )
+        .expect("should query recurring tasks");
+        let future_key = tasks[4].occurrence_key.clone();
+        TaskService::set_occurrence_status(
+            &database,
+            TaskSetOccurrenceStatusInput {
+                series_id: created.series_id.clone(),
+                occurrence_key: future_key.clone(),
+                status: "completed".to_string(),
+            },
+        )
+        .expect("should set occurrence status");
+
+        TaskService::update_template_from(
+            &database,
+            TaskUpdateTemplateFromInput {
+                series_id: created.series_id.clone(),
+                effective_from: "2026-04-15".to_string(),
+                title: "新提醒".to_string(),
+                note: None,
+                tag_id: None,
+                priority: None,
+                all_day: true,
+                start_date: Some("2026-04-15".to_string()),
+                start_time: None,
+                due_date: "2026-04-15".to_string(),
+                due_time: None,
+                recurrence_type: Some("day".to_string()),
+                recurrence_interval: Some(1),
+                recurrence_until: None,
+                clear_future_overrides: true,
+            },
+        )
+        .expect("should update template from");
+
+        let detail = TaskService::get_occurrence_detail(
+            &database,
+            &created.series_id,
+            &future_key,
+        )
+        .expect("should get occurrence detail")
+        .expect("detail should exist");
+        assert_eq!(
+            detail.status, "pending",
+            "未来覆盖应被清除，状态回退为 pending"
+        );
+        assert!(
+            detail.completed_at.is_none(),
+            "完成时间应被清除"
+        );
     }
 
     #[test]

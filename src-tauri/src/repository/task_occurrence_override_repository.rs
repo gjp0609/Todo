@@ -191,4 +191,9 @@ impl TaskOccurrenceOverrideRepository {
         )?;
         Ok(())
     }
+
+    pub fn delete_by_id(connection: &Connection, id: &str) -> AppResult<()> {
+        connection.execute("DELETE FROM task_occurrence_override WHERE id = ?1", [id])?;
+        Ok(())
+    }
 }
